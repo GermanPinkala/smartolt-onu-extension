@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<title>SmartOLT — Control de ONUs</title>
+<link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>SmartOLT — Control de ONUs</h1>
+    <p class="subtitle" id="subtitle">Estado del último CSV capturado</p>
+  </header>
+
+  <main>
+    <!-- Pantalla principal: pasiva, solo refleja el estado guardado (nunca dispara nada al abrir) -->
+    <section id="homeScreen" class="screen">
+
+      <!-- Estado: home. Los botones siempre están visibles/alcanzables acá,
+           exista o no un CSV capturado (v3.0.8) — lo único que cambia según
+           haya o no CSV es: el badge "✓ CSV capturado" y las estadísticas
+           compactas (se ocultan sin CSV, no hay nada que mostrar), y si
+           "ESTADO DE CAJAS"/"Descargar último CSV" están habilitados (dependen
+           del CSV) — "OBTENER DATOS DEL CLIENTE" es independiente y se
+           habilita/deshabilita solo según la pestaña activa (ver
+           refreshClienteBtnState en popup.js). -->
+      <div id="capturedBox" class="captured-box" hidden>
+        <p id="csvCapturedBadge" class="query-status-badge">✓ CSV capturado</p>
+
+        <div id="compactStats" class="compact-stats">
+          <span class="stat-chip"><strong id="sumTotal">0</strong> ONUs</span>
+          <span id="losPowerFailChip" class="stat-chip" hidden></span>
+          <span class="stat-chip">🟢 <strong id="sumOnline">0</strong> Online</span>
+        </div>
+
+        <p id="cajaNames" class="caja-names"></p>
+
+        <button id="consultarCajasBtn" class="btn btn-secondary">🔎 ESTADO DE CAJAS</button>
+        <button id="obtenerClienteBtn" class="btn btn-client-disabled" disabled title="Abrí la ficha de un cliente en SmartOLT (.../onu/view/ID) para usar este botón.">👤 OBTENER DATOS DEL CLIENTE</button>
+
+        <button id="downloadCsvBtn" class="btn btn-ghost">📥 Descargar último CSV</button>
+
+        <p id="copyFeedback" class="copy-feedback" hidden>✓ Copiado</p>
+        <p id="clienteFeedback" class="copy-feedback" hidden></p>
+        <p id="csvFeedback" class="copy-feedback" hidden></p>
+      </div>
+
+      <!-- Estado: el CSV capturado supera el límite de seguridad -->
+      <div id="overLimitBox" class="error-box" hidden>
+        <p id="overLimitText"></p>
+      </div>
+
+      <!-- Estado: la captura automática en segundo plano falló -->
+      <div id="captureFailedBox" class="error-box" hidden>
+        <p>⚠️ No se pudo capturar automáticamente el último CSV exportado.</p>
+        <p class="hint-msg">Podés usar las opciones manuales de abajo como respaldo.</p>
+      </div>
+
+      <!-- Funciones manuales: respaldo, no protagonistas -->
+      <details class="manual-options">
+        <summary>Opciones manuales</summary>
+        <div class="manual-options-body">
+          <div id="manualLoadingMsg" class="loading-msg" hidden></div>
+          <button id="selectBtn" class="btn btn-secondary">📄 Procesar otro CSV</button>
+          <input type="file" id="fileInput" accept=".csv,text/csv" hidden />
+          <button id="autoDetectBtn" class="btn btn-secondary">🔎 Detectar último CSV descargado</button>
+          <p id="hintMsg" class="hint-msg" hidden></p>
+        </div>
+      </details>
+    </section>
+
+    <!-- Pantalla de error: solo para fallas al procesar un CSV cargado manualmente -->
+    <section id="errorScreen" class="screen" hidden>
+      <div class="error-box">
+        <p id="errorText">⚠️ No se pudo identificar la estructura del archivo de SmartOLT.</p>
+        <ul id="errorDetails" class="error-details"></ul>
+      </div>
+      <button id="backToHomeBtn" class="btn btn-secondary">🔄 Volver</button>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    <span>🔒 Procesamiento 100% local — no se envía información a ningún servidor</span>
+    <div id="teamSignature" class="team-signature" role="button" tabindex="0" aria-label="Firma del equipo">
+      <span id="teamSignatureLine1"></span>
+      <span id="teamSignatureLine2" class="team-signature-line2" hidden></span>
+    </div>
+  </footer>
+
+  <script src="shared.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

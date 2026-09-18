@@ -1,0 +1,370 @@
+:root {
+  --bg: #0f172a;
+  --panel: #1e293b;
+  --panel-2: #16213a;
+  --border: #2d3b52;
+  --text: #e2e8f0;
+  --text-dim: #94a3b8;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --green: #22c55e;
+  --red: #ef4444;
+  --radius: 10px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  width: 380px;
+  min-height: 200px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+}
+
+.app-header {
+  padding: 16px 18px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.app-header h1 {
+  margin: 0 0 4px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.subtitle {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 12.5px;
+}
+
+main {
+  padding: 16px 18px;
+}
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* .screen fija "display: flex" con la misma especificidad que la regla del
+   navegador para [hidden] ("display: none"), y una regla de autor le gana a
+   la hoja de estilos del user agent aunque la especificidad sea igual. Esta
+   regla, más específica, hace que [hidden] vuelva a ocultar de verdad. */
+.screen[hidden] {
+  display: none;
+}
+
+/* Mismo motivo: .captured-box y .error-box también fijan "display: flex" más
+   abajo, así que necesitan la misma regla — si no, .hidden = true no las
+   oculta y pueden verse varios estados a la vez (esto fue exactamente el bug
+   reportado: "CSV capturado" y "no se pudo capturar" visibles al mismo
+   tiempo). */
+.captured-box[hidden],
+.error-box[hidden] {
+  display: none;
+}
+
+.btn {
+  border: none;
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  width: 100%;
+  transition: background-color .15s ease, transform .05s ease;
+}
+
+.btn:active {
+  transform: scale(0.98);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: white;
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+}
+
+.btn-secondary {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.btn-secondary:hover {
+  background: #24344c;
+}
+
+/* Corrección visual (sección 6, v3.0.5): estado deshabilitado de "OBTENER
+   DATOS DEL CLIENTE" cuando la pestaña activa NO es una ficha de cliente
+   (.../onu/view/...). Debe verse claramente distinto tanto del botón
+   habilitado (azul/btn-primary) como de "ESTADO DE CAJAS" (gris/btn-secondary
+   con texto casi blanco): mismo fondo gris, pero texto gris medio — NUNCA
+   blanco — para que quede visualmente claro que la acción no está disponible
+   sin dejar de ser perfectamente legible. */
+.btn-client-disabled {
+  background: var(--panel);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+}
+
+/* Anula la opacidad genérica de ".btn:disabled" (pensada para un atenuado
+   rápido) para que este gris quede nítido y legible en vez de "lavado". */
+.btn-client-disabled:disabled {
+  opacity: 1;
+  cursor: not-allowed;
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--accent);
+  border: none;
+  padding: 4px 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+  width: auto;
+  align-self: center;
+}
+
+.btn-ghost:hover {
+  text-decoration: underline;
+}
+
+.loading-msg {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.hint-msg {
+  margin: 0;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.error-box {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: var(--radius);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.error-box p {
+  margin: 0;
+  font-weight: 600;
+}
+
+.error-box .hint-msg {
+  font-weight: 400;
+}
+
+.error-details {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--text-dim);
+  font-size: 12.5px;
+}
+
+.query-status-badge {
+  margin: 0;
+  padding: 8px 12px;
+  background: rgba(34, 197, 94, 0.1);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  border-radius: 8px;
+  color: var(--green);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.captured-box {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.compact-stats {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+}
+
+/* Mismo motivo que .screen/.captured-box/etc. más arriba (v3.0.8): al fijar
+   "display: flex" acá arriba, hace falta esta regla extra para que [hidden]
+   (que popup.js agrega cuando no hay ningún CSV capturado) vuelva a ocultar
+   de verdad este bloque de estadísticas. */
+.compact-stats[hidden] {
+  display: none;
+}
+
+.stat-chip {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.stat-chip strong {
+  font-size: 14px;
+}
+
+.caja-names {
+  margin: 0;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-line;
+}
+
+.copy-feedback {
+  text-align: center;
+  color: var(--green);
+  font-size: 12.5px;
+  margin: -4px 0 0;
+}
+
+.manual-options {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.manual-options summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  user-select: none;
+}
+
+.manual-options summary:hover {
+  color: var(--text);
+}
+
+.manual-options-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.app-footer {
+  padding: 10px 18px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 10.5px;
+  text-align: center;
+}
+
+/* Firma del equipo: chica, discreta, debajo del aviso de procesamiento local.
+   Es tocable/clickeable (easter egg de los 6 toques) pero no se le da un
+   estilo llamativo de botón — se mantiene como una firma más. */
+.team-signature {
+  margin-top: 6px;
+  cursor: pointer;
+  user-select: none;
+  text-decoration: underline;
+}
+
+.team-signature:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.team-signature-line2 {
+  display: block;
+  margin-top: 2px;
+  font-style: italic;
+  opacity: 0.85;
+}
+
+/* Mismo motivo que .screen/.captured-box/etc. más arriba: al fijar
+   "display: block" en la regla de arriba, hace falta esta regla extra para
+   que [hidden] (que agrega popup.js cuando no hay frase especial ni toques
+   todavía) vuelva a ocultar de verdad el elemento. */
+.team-signature-line2[hidden] {
+  display: none;
+}
+
+/* ---------- Temas visuales de fechas especiales (v3.0.7) ---------- */
+/* Aplicados por popup.js vía body[data-theme="..."] (ver
+   SmartOLTShared.getActiveTheme). Cada tema SOLO redefine las variables
+   decorativas de más arriba (fondo, paneles, bordes, acento) — nunca
+   --text/--text-dim (legibilidad), nunca --green/--red (colores funcionales
+   de ✅/❌ y de los indicadores de estado), nunca --radius, y ninguna otra
+   regla de este archivo. Misma estructura, tamaños y botones de siempre;
+   solo cambia la paleta. Fuera de una fecha especial no hay atributo
+   data-theme y se usa el tema normal (:root de arriba), sin cambios. */
+
+/* Año Nuevo (1/1): azul oscuro + dorado, discreto. */
+body[data-theme="anio-nuevo"] {
+  --bg: #0a1128;
+  --panel: #131c3f;
+  --panel-2: #0f1730;
+  --border: #b8963f;
+  --accent: #d4af37;
+  --accent-hover: #c49a2c;
+}
+
+/* Día de Internet (17/5): azul eléctrico, sutil. */
+body[data-theme="dia-internet"] {
+  --bg: #061a2e;
+  --panel: #0c2846;
+  --panel-2: #082036;
+  --border: #1e63b8;
+  --accent: #2f8fff;
+  --accent-hover: #1c78e6;
+}
+
+/* Día del Técnico (10/8): azul técnico / gris metálico. */
+body[data-theme="dia-tecnico"] {
+  --bg: #0e1721;
+  --panel: #1a2733;
+  --panel-2: #15202b;
+  --border: #3a4c5c;
+  --accent: #4f7ea8;
+  --accent-hover: #3d6690;
+}
+
+/* Halloween (31/10): oscuro con acentos naranja/violeta. */
+body[data-theme="halloween"] {
+  --bg: #150a1f;
+  --panel: #221230;
+  --panel-2: #1b0e27;
+  --border: #6b3fa0;
+  --accent: #ff7518;
+  --accent-hover: #e8650e;
+}
+
+/* Navidad (temporada, ver isChristmasSeason): rojo/verde/dorado sobre fondo oscuro. */
+body[data-theme="navidad"] {
+  --bg: #0d1f14;
+  --panel: #16281c;
+  --panel-2: #112017;
+  --border: #b8322f;
+  --accent: #2f9e55;
+  --accent-hover: #24803f;
+}

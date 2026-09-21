@@ -238,6 +238,32 @@ function formatCajaAverageText(info) {
   }
 }
 
+// Normaliza únicamente diferencias de espacios y mayúsculas. El contador final
+// solo se elimina cuando está separado del nombre por espacios, como en
+// "A1AA1  8"; nombres como "A1AA1" no se alteran.
+function normalizeCajaName(raw) {
+  return String(raw || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\s+\d+$/, "")
+    .trim()
+    .toUpperCase();
+}
+
+function buildDataIdentity(records, source = {}) {
+  const cajaNames = Array.from(
+    new Set((records || []).map((record) => normalizeCajaName(record.caja)).filter(Boolean))
+  ).sort(naturalCompare);
+
+  return {
+    cajaNames,
+    pon: source.pon || null,
+    sourceUrl: source.sourceUrl || null,
+    tabId: source.tabId ?? null,
+    capturedAt: source.capturedAt || null,
+  };
+}
+
 // LOS = problema de señal con la ONU encendida (🔴). Power fail = ONU sin
 // alimentación (⚫).
 function getStatusIcon(status) {
@@ -265,6 +291,7 @@ const SMARTOLT_HOST_RE = /(^|\.)smartolt\.com$/i;
 // etc.) NO son ficha de cliente. Usado por popup.js para habilitar/deshabilitar
 // "OBTENER DATOS DEL CLIENTE" según la URL de la pestaña activa.
 const CLIENT_PAGE_PATH_RE = /^\/onu\/view\/[^/?#]+/i;
+const ONU_CONFIGURED_PATH_RE = /^\/onu\/configured(?:\/)?$/i;
 
 function isClientPageUrl(rawUrl) {
   if (!rawUrl) return false;
@@ -275,6 +302,17 @@ function isClientPageUrl(rawUrl) {
     return false;
   }
   return SMARTOLT_HOST_RE.test(u.hostname) && CLIENT_PAGE_PATH_RE.test(u.pathname);
+}
+
+function isOnuConfiguredPageUrl(rawUrl) {
+  if (!rawUrl) return false;
+  let u;
+  try {
+    u = new URL(rawUrl);
+  } catch (e) {
+    return false;
+  }
+  return SMARTOLT_HOST_RE.test(u.hostname) && ONU_CONFIGURED_PATH_RE.test(u.pathname);
 }
 
 const CAJA_SEPARATOR = "-".repeat(29); // exactamente 29 guiones, solo ENTRE cajas
@@ -331,6 +369,18 @@ function sortByPuertoAscending(records) {
 function isProblemStatusForCajaReport(status) {
   const s = String(status || "").trim().toLowerCase();
   return s === "los" || s === "power fail" || s === "offline" || s === "disabled";
+}
+
+function normalizeClientStatusLabel(status) {
+  const raw = String(status || "").trim();
+  const normalized = raw.toLowerCase().replace(/\s+/g, " ");
+  if (normalized.includes("los") && normalized.includes("power fail")) return "LOS/Power fail";
+  if (normalized === "los") return "LOS";
+  if (normalized === "power fail") return "Power fail";
+  if (normalized === "offline") return "Offline";
+  if (normalized === "online") return "Online";
+  if (normalized === "disabled") return "Disabled";
+  return raw || "Estado N/D";
 }
 
 // Etiqueta + conteo de la línea de estado problemático de una caja:
@@ -708,24 +758,9 @@ function parseCajaPortLabel(raw) {
 }
 
 // ---------- Comparación óptica cliente vs promedio de caja ----------
-// Dos conceptos distintos, con propósitos distintos:
-//   - OPTICAL_TOLERANCE_DB: la ZONA SEGURA de comparación — hasta 1.00 dB
-//     PEOR que el promedio sigue aprobando (✅). Es el mismo umbral que usa,
-//     de forma independiente, el mensaje motivacional de "OP mejor que el
-//     promedio" (categoría B, ver computeMotivationalMessage) para el caso
-//     contrario (cliente MEJOR que el promedio) — no se toca acá.
-//   - APPROVAL_TOLERANCE_DB: margen ADICIONAL de 0.05 dB de redondeo/diferencia
-//     mínima (v3.0.8 — corrección: antes se evaluaba por separado y quedaba
-//     contenido dentro de la zona segura, sin ampliarla; ahora SE SUMA al
-//     límite de arriba) -> el límite real de aprobación es OPTICAL_TOLERANCE_DB
-//     + APPROVAL_TOLERANCE_DB = 1.05 dB (ver isOpticalApproved). El valor de
-//     "Debe mejorar" NUNCA usa este límite ampliado: sigue calculándose
-//     únicamente contra los 1.00 dB de OPTICAL_TOLERANCE_DB (ver
-//     buildClientReport) — este margen solo mueve el límite de aprobación,
-//     nunca la fórmula de cuánto le falta mejorar al cliente.
-// Exactamente 1.00 dB (o 1.05 dB con el margen) peor todavía aprueba (por eso
-// "<=" y no "<").
-const APPROVAL_TOLERANCE_DB = 0.05;
+// Check 1 y Check 2 utilizan una diferencia absoluta máxima de 1.00 dB.
+// No se aplica un margen adicional: la comparación es simétrica para valores
+// dBm más altos o más bajos que el promedio.
 const OPTICAL_TOLERANCE_DB = 1;
 
 // Redondeada a 2 decimales para evitar que un residuo de punto flotante
@@ -736,27 +771,63 @@ function opticalDiff(clientValue, cajaAvg) {
   return Math.round(Math.abs(clientValue - cajaAvg) * 100) / 100;
 }
 
-// Corrección v3.0.4: la aprobación óptica es SIEMPRE respecto de la
-// DIRECCIÓN de la diferencia, nunca de su valor absoluto a secas. Trabajamos
-// con dBm negativos, donde un valor más cercano a 0 es una señal MEJOR (más
-// potencia recibida) y uno más negativo es PEOR (más atenuación).
-//   - Si el cliente está IGUAL o MEJOR que el promedio de su caja (valor
-//     mayor o igual), aprueba SIEMPRE, sin importar cuánto mejor sea — nunca
-//     hay que pedirle a un técnico que empeore una señal que ya es buena.
-//   - Si el cliente está PEOR que el promedio (valor menor), se mide cuánto
-//     peor en dB positivos y se compara contra la zona segura de
-//     OPTICAL_TOLERANCE_DB (1.00 dB) MÁS el margen adicional de
-//     APPROVAL_TOLERANCE_DB (0.05 dB) -> hasta 1.05 dB peor sigue aprobando
-//     (✅ "aprobado por margen"); por encima de eso, reprueba (❌).
-// Devuelve true/false, o null si falta alguno de los dos valores (no se
-// puede comparar, nunca se inventa un resultado).
+// Devuelve true/false según la dirección y la diferencia, o null si falta
+// alguno de los valores. Un valor menos negativo que el promedio es mejor y
+// aprueba sin límite; solo se limita cuánto puede ser peor.
 function isOpticalApproved(clientValue, cajaAvg) {
   if (clientValue === null || clientValue === undefined) return null;
   if (cajaAvg === null || cajaAvg === undefined) return null;
-  if (clientValue >= cajaAvg) return true; // igual o mejor que el promedio
+  if (clientValue >= cajaAvg) return true;
   const worseness = Math.round((cajaAvg - clientValue) * 100) / 100;
-  // v3.0.8: el límite de aprobación es 1.00 dB + 0.05 dB de margen = 1.05 dB.
-  return worseness <= OPTICAL_TOLERANCE_DB + APPROVAL_TOLERANCE_DB;
+  return worseness <= OPTICAL_TOLERANCE_DB;
+}
+
+// Check 3 usa los promedios de Check 1 y Check 2 únicamente para seleccionar
+// referencias normales. Después calcula el promedio de DIF de todas ellas.
+// Requiere dos referencias normales como mínimo: una sola DIF no representa
+// razonablemente el comportamiento de una caja.
+function evaluateCheck3(clientOnu, clientOlt, referenceRecords, cajaOnuAvg, cajaOltAvg) {
+  const validReferences = (referenceRecords || []).filter(
+    (record) =>
+      String(record.status || "").trim().toLowerCase() === "online" &&
+      record.sig1490 !== null &&
+      record.sig1490 !== undefined &&
+      record.sig1310 !== null &&
+      record.sig1310 !== undefined
+  );
+
+  if (
+    clientOnu === null ||
+    clientOnu === undefined ||
+    clientOlt === null ||
+    clientOlt === undefined ||
+    cajaOnuAvg === null ||
+    cajaOnuAvg === undefined ||
+    cajaOltAvg === null ||
+    cajaOltAvg === undefined
+  ) {
+    return { status: "not_run" };
+  }
+
+  const normalReferences = validReferences.filter(
+    (record) =>
+      Math.abs(record.sig1490 - cajaOnuAvg) <= OPTICAL_TOLERANCE_DB &&
+      Math.abs(record.sig1310 - cajaOltAvg) <= OPTICAL_TOLERANCE_DB
+  );
+
+  if (normalReferences.length < 2) return { status: "not_run" };
+
+  const normalDifferences = normalReferences.map((record) => Math.abs(record.sig1490 - record.sig1310));
+  const normalDifference = average(normalDifferences);
+  const clientDifference = Math.abs(clientOnu - clientOlt);
+  const deviation = clientDifference - normalDifference;
+
+  return {
+    status: deviation <= OPTICAL_TOLERANCE_DB ? "passed" : "failed",
+    deviation: Math.round(deviation * 100) / 100,
+    normalDifference: Math.round(normalDifference * 100) / 100,
+    referenceCount: normalReferences.length,
+  };
 }
 
 function formatDb(n) {
@@ -987,6 +1058,17 @@ function buildClientReport(clientData, csvRecords, randomFn) {
   const evalRecords = hasCsv ? buildClientEvaluationRecords(csvRecords, clientData) : null;
   const cajaAverages = hasCsv ? buildCajaAverages(evalRecords.referenceRecords) : null;
   const cajaInfo = caja && cajaAverages ? findCajaAverage(cajaAverages, caja) : null;
+  const cajaRecords = evalRecords
+    ? evalRecords.adjustedRecords.filter((record) => normalizeCajaName(record.caja) === normalizeCajaName(caja))
+    : [];
+  const availableOpCount = cajaRecords.filter(
+    (record) =>
+      String(record.status || "").trim().toLowerCase() === "online" &&
+      record.sig1490 !== null &&
+      record.sig1490 !== undefined &&
+      record.sig1310 !== null &&
+      record.sig1310 !== undefined
+  ).length;
 
   const lines = [`Cliente: \`${name}\``, "", `- Serial ONU: \`${serial}\``];
 
@@ -1003,9 +1085,9 @@ function buildClientReport(clientData, csvRecords, randomFn) {
     lines.push(`- Caja: \`${caja}\` - ${puertoLabel}`);
     if (!cajaAverages) {
       cajaWarning = "No hay ningún CSV capturado — no se pudo calcular el promedio de la caja.";
-    } else if (!cajaInfo) {
+    } else if (!cajaInfo && cajaRecords.length === 0) {
       cajaWarning = `La caja del cliente (${caja}) no coincide con ninguna caja del CSV.`;
-    } else if (cajaInfo.kind !== "OK") {
+    } else if (cajaInfo && cajaInfo.kind !== "OK") {
       cajaWarning = `No se pudo calcular el promedio de la caja ${caja} (${formatCajaAverageText(cajaInfo)}).`;
     }
   } else {
@@ -1028,12 +1110,11 @@ function buildClientReport(clientData, csvRecords, randomFn) {
   // trata como aprobado ni como reprobado).
   let onuOk = null;
   let oltOk = null;
+  let check3 = { status: "not_run" };
 
   if (canCompare) {
-    // onuDiff/oltDiff: magnitud absoluta (sin dirección), solo se usa más abajo
-    // para calcular cuánto falta mejorar cuando el cliente realmente está peor.
-    // onuOk/oltOk: SÍ tienen en cuenta la dirección (ver isOpticalApproved) —
-    // un cliente igual o mejor que el promedio de su caja siempre aprueba.
+    // onuDiff/oltDiff son las diferencias absolutas usadas por los warnings.
+    // onuOk/oltOk aplican la tolerancia exacta de 1.00 dB para cada check.
     const onuDiff = opticalDiff(clientOnu, cajaInfo.onuResult.avg);
     const oltDiff = opticalDiff(clientOlt, cajaInfo.oltResult.avg);
     onuOk = isOpticalApproved(clientOnu, cajaInfo.onuResult.avg);
@@ -1046,12 +1127,26 @@ function buildClientReport(clientData, csvRecords, randomFn) {
     // muestra ✅ ni ❌ ni se calcula ninguna mejora en ese caso. Solo cuando
     // AMBOS lados tienen un resultado determinado (true/false) se decide entre
     // ✅ (ambos aprobados) y ❌ (al menos uno necesita mejorar).
-    const bothEvaluable = onuOk !== null && oltOk !== null;
+    if (onuOk === true && oltOk === false) {
+      const sameCajaReferences = evalRecords.referenceRecords.filter(
+        (record) => normalizeCajaName(record.caja) === normalizeCajaName(caja)
+      );
+      check3 = evaluateCheck3(
+        clientOnu,
+        clientOlt,
+        sameCajaReferences,
+        cajaInfo.onuResult.avg,
+        cajaInfo.oltResult.avg
+      );
+    }
+
+    const effectiveOltOk = oltOk === false && check3.status === "passed" ? true : oltOk;
+    const bothEvaluable = onuOk !== null && effectiveOltOk !== null;
     let badge;
     if (!bothEvaluable) {
       badge = "⚠️";
     } else {
-      badge = onuOk && oltOk ? "✅" : "❌";
+      badge = onuOk && effectiveOltOk ? "✅" : "❌";
     }
 
     // Formato definitivo v3.0.5: sin etiquetas "OP ONU"/"OP OLT" repetidas,
@@ -1062,7 +1157,13 @@ function buildClientReport(clientData, csvRecords, randomFn) {
 
     const onuAvgPart = cajaInfo.onuResult.avg !== null ? `ONU ${cajaInfo.onuResult.avg.toFixed(2)} dBm` : "ONU Sin datos";
     const oltAvgPart = cajaInfo.oltResult.avg !== null ? `OLT ${cajaInfo.oltResult.avg.toFixed(2)} dBm` : "OLT Sin datos";
-    lines.push(`- \`Prom. de caja: ${onuAvgPart}/${oltAvgPart}\``);
+    if (availableOpCount >= 3) {
+      lines.push(`- \`Prom. de caja: ${onuAvgPart}/${oltAvgPart}\``);
+    } else if (availableOpCount === 2) {
+      lines.push(`- \`Prom. de caja: ${onuAvgPart}/${oltAvgPart} (solo 2 OP)\``);
+    } else {
+      lines.push("- Prom. de caja: no hay otro OP para comparar");
+    }
 
     // La advertencia de mejora SOLO se calcula cuando AMBOS lados son
     // evaluables: si falta cualquiera de los dos, el caso completo es "NO
@@ -1077,29 +1178,35 @@ function buildClientReport(clientData, csvRecords, randomFn) {
     if (bothEvaluable) {
       const warnings = [];
       if (onuOk === false) warnings.push(`OP ONU al menos ${formatDb(onuDiff - OPTICAL_TOLERANCE_DB)} dB`);
-      if (oltOk === false) warnings.push(`OP OLT al menos ${formatDb(oltDiff - OPTICAL_TOLERANCE_DB)} dB`);
+      if (oltOk === false && check3.status !== "passed") {
+        warnings.push(`OP OLT al menos ${formatDb(oltDiff - OPTICAL_TOLERANCE_DB)} dB`);
+      }
       if (warnings.length > 0) {
         improvementWarning = `⚠️ Debe mejorar ${warnings.join(" y ")}`;
+      }
+
+      if (check3.status === "failed") {
+        const check3Warning = "para que la relación ONU/OLT quede acorde al comportamiento de la caja.";
+        improvementWarning = improvementWarning
+          ? `${improvementWarning} ${check3Warning}`
+          : `⚠️ Debe mejorar OP OLT ${check3Warning}`;
       }
     }
   } else {
     // Sin promedio calculable (caja no coincide, sin CSV, o caja sin OP
     // válidos): nunca se inventa un número ni se hace comparación óptica.
-    lines.push(`- \`OP Cliente: ${onuClientPart}/${oltClientPart}\``);
-    lines.push("- Prom. de caja: no se pudo obtener promedio de caja");
+    lines.push(`- \`OP Cliente: ${onuClientPart}/${oltClientPart}\`⚠️`);
+    lines.push(
+      availableOpCount <= 1 && cajaRecords.length > 0
+        ? "- Prom. de caja: no hay otro OP para comparar"
+        : "- Prom. de caja: no se pudo obtener promedio de caja"
+    );
   }
 
-  // Mensaje motivacional (sección 3, v3.0.5; corrección final): SOLO puede
-  // aparecer si tanto OP ONU como OP OLT del cliente están EXPLÍCITAMENTE
-  // aprobadas (onuOk === true Y oltOk === true) — un null (no evaluable, p.
-  // ej. falta la lectura de OLT) NUNCA cuenta como aprobado acá, a diferencia
-  // del badge de arriba. Si cualquiera de las dos necesita mejorar, o
-  // cualquiera de las dos no es evaluable, no se muestra ningún mensaje
-  // motivacional, aunque la ONU sea la mejor de toda la caja. OP OLT acá solo
-  // decide si el cliente puede recibir el mensaje; las categorías (mejor de
-  // la caja / ≥1dB sobre el promedio) se siguen evaluando ÚNICAMENTE con OP
-  // ONU, sin cambios.
-  const bothApproved = onuOk === true && oltOk === true;
+  // El mensaje motivacional solo aparece cuando el resultado final de ONU y
+  // OLT está aprobado. Esto incluye el caso en que Check 3 haya aceptado el
+  // OLT después de un fallo individual de Check 2.
+  const bothApproved = onuOk === true && (oltOk === true || check3.status === "passed");
   const motivationalMessage = bothApproved
     ? computeMotivationalMessage(clientOnu, caja, cajaInfo, evalRecords.adjustedRecords, rand)
     : null;
@@ -1358,6 +1465,59 @@ const TAP_EASTER_EGG_MESSAGES = [
 // Cuánto tiempo queda visible cada mensaje antes de volver a la firma normal.
 const TAP_EASTER_EGG_DISPLAY_MS = 10000;
 
+// Historial permanente de cambios visibles para operadores. Solo las entradas
+// con notification.enabled generan una novedad pendiente.
+const CHANGELOG_ENTRIES = [
+  {
+    version: "3.0.9",
+    changes: [
+      {
+        title: "🆕 Nueva forma de actualizar los datos",
+        text: "Ahora podés obtener los datos de las cajas directamente desde la extensión.",
+      },
+      {
+        title: "🆕 Previsualización del texto",
+        text: "Ahora podés revisar exactamente qué texto copió la extensión para enviarlo por Telegram.",
+      },
+      {
+        title: "👤 Consulta de clientes sin bloqueos innecesarios",
+        text: "Ahora podés consultar y copiar los datos aunque falte caja, puerto, OP o promedio de caja.",
+      },
+      {
+        title: "📍 Indicador de actualidad de la caja",
+        text: "La caja actual se muestra en verde cuando está incluida en los datos cargados y en gris cuando falta, junto con un aviso para actualizar.",
+      },
+      {
+        title: "🔔 Avisos operativos temporales",
+        text: "Los avisos operativos importantes tienen prioridad sobre las novedades y aparecen temporalmente sin ocupar espacio de forma permanente.",
+      },
+      {
+        title: "👀 Historial de versiones",
+        text: "Podés consultar desde el pie de la extensión los cambios relevantes de cada versión.",
+      },
+    ],
+    notifications: [
+      {
+        id: "update-csv-3.0.9",
+        priority: 10,
+        summary: "🆕 Ya no descargues el CSV manualmente: usá 🔄 Actualizar datos.",
+        detail:
+          "🆕 Nueva forma de actualizar los datos\n\nAhora podés obtener los datos de las cajas directamente desde la extensión.\n\n1. Seleccioná la/s caja/s en SmartOLT.\n2. Luego, en la extensión, presioná 🔄 Actualizar datos.\n3. Esperá a que finalice la exportación.\n\nListo. Ya podés consultar las cajas o los datos del cliente.",
+      },
+    ],
+  },
+  {
+    version: "3.0.8",
+    changes: [
+      {
+        title: "📄 Procesamiento de exportaciones SmartOLT",
+        text: "La extensión procesa localmente los datos exportados y conserva las consultas existentes.",
+      },
+    ],
+    notifications: [],
+  },
+];
+
 function initialTapEasterEggState() {
   return { count: 0 };
 }
@@ -1385,9 +1545,10 @@ const SmartOLTShared = {
   REQUIRED_COLUMNS,
   SMARTOLT_HOST_RE,
   CLIENT_PAGE_PATH_RE,
+  ONU_CONFIGURED_PATH_RE,
   isClientPageUrl,
+  isOnuConfiguredPageUrl,
   OPTICAL_TOLERANCE_DB,
-  APPROVAL_TOLERANCE_DB,
   parseCSV,
   analyzeCSV,
   parseRecordsFromCSV,
@@ -1397,6 +1558,8 @@ const SmartOLTShared = {
   naturalCompare,
   isLosOrPowerFailStatus,
   parseCajaPortLabel,
+  normalizeCajaName,
+  buildDataIdentity,
   buildCajaAverages,
   findCajaAverage,
   buildLosPowerFailReport,
@@ -1411,6 +1574,7 @@ const SmartOLTShared = {
   buildClientEvaluationRecords,
   opticalDiff,
   isOpticalApproved,
+  evaluateCheck3,
   computeMotivationalMessage,
   MOTIVATIONAL_BEST_IN_CAJA_MESSAGES,
   MOTIVATIONAL_BETTER_THAN_AVERAGE_MESSAGES,
@@ -1424,6 +1588,7 @@ const SmartOLTShared = {
   NAVIDAD_THEME_START_DAY,
   TAP_EASTER_EGG_MESSAGES,
   TAP_EASTER_EGG_DISPLAY_MS,
+  CHANGELOG_ENTRIES,
   initialTapEasterEggState,
   advanceTapEasterEgg,
   parsePonFromFileName,

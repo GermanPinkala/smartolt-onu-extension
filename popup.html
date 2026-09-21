@@ -15,16 +15,28 @@
     <!-- Pantalla principal: pasiva, solo refleja el estado guardado (nunca dispara nada al abrir) -->
     <section id="homeScreen" class="screen">
 
+      <section id="notificationBox" class="notification-box" hidden aria-live="polite">
+        <div class="notification-header">
+          <p id="notificationSummary" class="notification-summary"></p>
+          <div class="notification-actions">
+            <button id="notificationDetailBtn" class="notification-icon-btn" type="button" hidden aria-label="Ver detalle de la novedad" title="Ver detalle">👁</button>
+            <button id="notificationCloseBtn" class="notification-icon-btn" type="button" hidden aria-label="Cerrar aviso">✕</button>
+          </div>
+        </div>
+        <pre id="notificationDetail" class="notification-detail" hidden></pre>
+        <button id="notificationAcknowledgeBtn" class="btn btn-secondary notification-acknowledge" type="button" hidden>Entendido</button>
+      </section>
+
       <!-- Estado: home. Los botones siempre están visibles/alcanzables acá,
            exista o no un CSV capturado (v3.0.8) — lo único que cambia según
-           haya o no CSV es: el badge "✓ CSV capturado" y las estadísticas
-           compactas (se ocultan sin CSV, no hay nada que mostrar), y si
+           haya o no CSV son las estadísticas compactas (se ocultan sin CSV,
+           no hay nada que mostrar), y si
            "ESTADO DE CAJAS"/"Descargar último CSV" están habilitados (dependen
            del CSV) — "OBTENER DATOS DEL CLIENTE" es independiente y se
            habilita/deshabilita solo según la pestaña activa (ver
            refreshClienteBtnState en popup.js). -->
       <div id="capturedBox" class="captured-box" hidden>
-        <p id="csvCapturedBadge" class="query-status-badge">✓ CSV capturado</p>
+         <p id="csvCapturedBadge" class="query-status-badge" hidden>✓ CSV capturado</p>
 
         <div id="compactStats" class="compact-stats">
           <span class="stat-chip"><strong id="sumTotal">0</strong> ONUs</span>
@@ -34,8 +46,18 @@
 
         <p id="cajaNames" class="caja-names"></p>
 
+        <button id="updateDataBtn" class="btn btn-primary" disabled title="Abrí /onu/configured en SmartOLT para actualizar los datos.">🔄 Actualizar datos</button>
+        <p id="updateStatus" class="update-status" hidden></p>
         <button id="consultarCajasBtn" class="btn btn-secondary">🔎 ESTADO DE CAJAS</button>
         <button id="obtenerClienteBtn" class="btn btn-client-disabled" disabled title="Abrí la ficha de un cliente en SmartOLT (.../onu/view/ID) para usar este botón.">👤 OBTENER DATOS DEL CLIENTE</button>
+
+        <section class="generated-preview" aria-labelledby="generatedPreviewLabel">
+          <button id="generatedPreviewToggle" class="generated-preview-toggle" type="button" aria-expanded="false" aria-controls="generatedTextPreview">
+            <span id="generatedPreviewLabel">Texto generado</span>
+            <span id="generatedPreviewIcon" aria-hidden="true">▼</span>
+          </button>
+          <textarea id="generatedTextPreview" readonly hidden placeholder="El resultado copiado aparecerá aquí."></textarea>
+        </section>
 
         <button id="downloadCsvBtn" class="btn btn-ghost">📥 Descargar último CSV</button>
 
@@ -76,12 +98,22 @@
       </div>
       <button id="backToHomeBtn" class="btn btn-secondary">🔄 Volver</button>
     </section>
+
+    <section id="changelogScreen" class="screen" hidden>
+      <div class="changelog-box">
+        <h2>Historial de versiones</h2>
+        <div id="changelogContent"></div>
+      </div>
+      <button id="backFromChangelogBtn" class="btn btn-secondary" type="button">🔄 Volver</button>
+    </section>
   </main>
 
   <footer class="app-footer">
     <span>🔒 Procesamiento 100% local — no se envía información a ningún servidor</span>
     <div id="teamSignature" class="team-signature" role="button" tabindex="0" aria-label="Firma del equipo">
       <span id="teamSignatureLine1"></span>
+      <span id="versionChangelogLink" class="version-changelog-link" role="button" tabindex="0" aria-label="Abrir historial de versiones"></span>
+      <span id="teamSignatureCreatedBy"></span>
       <span id="teamSignatureLine2" class="team-signature-line2" hidden></span>
     </div>
   </footer>

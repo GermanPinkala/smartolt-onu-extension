@@ -46,12 +46,21 @@ if (activeTheme !== "normal") {
 }
 
 const STORAGE_KEY = "smartoltState";
+const PENDING_EXPORTS_KEY = "smartoltPendingExports";
+const UPDATE_STATUS_KEY = "smartoltUpdateStatus";
+const GENERATED_PREVIEW_STATE_KEY = "generatedTextExpanded";
+const NOTIFICATION_STATE_KEY = "smartoltNotificationState";
+const NOTIFICATION_TEST_RESET_KEY = "smartoltNotificationTestReset:update-csv-3.0.9";
+const NOTIFICATION_MAX_AGE_MS = 2 * 24 * 60 * 60 * 1000;
+const OPERATIONAL_NOTICE_DURATION_MS = 15000;
+const REQUEST_TTL_MS = 120000;
 const MAX_AUTO_DETECT_CANDIDATES = 8;
 
 // ---------- Referencias a elementos del DOM ----------
 const screens = {
   home: document.getElementById("homeScreen"),
   error: document.getElementById("errorScreen"),
+  changelog: document.getElementById("changelogScreen"),
 };
 
 const subtitle = document.getElementById("subtitle");
@@ -70,6 +79,19 @@ const cajaNamesEl = document.getElementById("cajaNames");
 const consultarCajasBtn = document.getElementById("consultarCajasBtn");
 const obtenerClienteBtn = document.getElementById("obtenerClienteBtn");
 const downloadCsvBtn = document.getElementById("downloadCsvBtn");
+const updateDataBtn = document.getElementById("updateDataBtn");
+const updateStatus = document.getElementById("updateStatus");
+const generatedTextPreview = document.getElementById("generatedTextPreview");
+const generatedPreviewToggle = document.getElementById("generatedPreviewToggle");
+const generatedPreviewIcon = document.getElementById("generatedPreviewIcon");
+const notificationBox = document.getElementById("notificationBox");
+const notificationSummary = document.getElementById("notificationSummary");
+const notificationDetailBtn = document.getElementById("notificationDetailBtn");
+const notificationCloseBtn = document.getElementById("notificationCloseBtn");
+const notificationDetail = document.getElementById("notificationDetail");
+const notificationAcknowledgeBtn = document.getElementById("notificationAcknowledgeBtn");
+const changelogContent = document.getElementById("changelogContent");
+const backFromChangelogBtn = document.getElementById("backFromChangelogBtn");
 const copyFeedback = document.getElementById("copyFeedback");
 const clienteFeedback = document.getElementById("clienteFeedback");
 const csvFeedback = document.getElementById("csvFeedback");
@@ -86,6 +108,8 @@ const backToHomeBtn = document.getElementById("backToHomeBtn");
 
 const teamSignature = document.getElementById("teamSignature");
 const teamSignatureLine1 = document.getElementById("teamSignatureLine1");
+const versionChangelogLink = document.getElementById("versionChangelogLink");
+const teamSignatureCreatedBy = document.getElementById("teamSignatureCreatedBy");
 const teamSignatureLine2 = document.getElementById("teamSignatureLine2");
 
 // Estado local del popup: lo que se está mostrando ahora mismo (viene del CSV
@@ -101,6 +125,13 @@ let currentFileName = null;
 // (en ese caso simplemente no se muestra esa línea — nunca se inventa una
 // fecha con Date.now()).
 let currentCapturedAt = null;
+let currentDataIdentity = null;
+
+let notificationState = {};
+let pendingVersionNotifications = [];
+let activeOperationalNotice = null;
+let operationalNoticeSeenKey = null;
+let operationalNoticeTimer = null;
 
 // =========================================================================
 // Pantallas
@@ -117,6 +148,10 @@ let currentCapturedAt = null;
 function updateSubtitle(screenName) {
   if (screenName === "error") {
     subtitle.textContent = "Hubo un problema con el archivo";
+    return;
+  }
+  if (screenName === "changelog") {
+    subtitle.textContent = "Historial de versiones";
     return;
   }
   const label = currentCapturedAt ? SmartOLTShared.formatShortDateTime(currentCapturedAt) : null;
@@ -173,6 +208,8 @@ function renderNoCsv() {
   currentCsvText = null;
   currentFileName = null;
   currentCapturedAt = null;
+  currentDataIdentity = null;
+  clearGeneratedTextPreview();
 
   copyFeedback.hidden = true;
   clienteFeedback.hidden = true;
@@ -212,6 +249,31 @@ function formatCajaNamesPreview(cajaNames) {
   return `${shown} ...+${remaining}`;
 }
 
+function renderCajaNamesWithContext(contextCajas) {
+  const loadedCajas = getLoadedCajaNames();
+  const currentCajas = Array.isArray(contextCajas) ? contextCajas : [];
+  if (currentCajas.length === 0) {
+    cajaNamesEl.textContent = formatCajaNamesPreview(loadedCajas);
+    return;
+  }
+
+  const names = [...new Set([...currentCajas, ...loadedCajas])];
+  const shownNames = names.slice(0, 4);
+  cajaNamesEl.replaceChildren();
+  shownNames.forEach((name, index) => {
+    if (index > 0) cajaNamesEl.appendChild(document.createTextNode(" · "));
+    const nameEl = document.createElement("span");
+    if (currentCajas.includes(name)) {
+      nameEl.className = loadedCajas.includes(name) ? "caja-context-present" : "caja-context-absent";
+    }
+    nameEl.textContent = name;
+    cajaNamesEl.appendChild(nameEl);
+  });
+
+  const remaining = names.length - shownNames.length;
+  if (remaining > 0) cajaNamesEl.appendChild(document.createTextNode(` ...+${remaining}`));
+}
+
 // Indicador único de estado problemático del mini-dashboard. losCount y
 // powerFailCount ya vienen de shared.js (buildAnalysisResult) como el
 // conteo COMBINADO final de su rama (misma clasificación que ESTADO DE
@@ -238,10 +300,12 @@ function formatEstadoCajasLabel(cajaCount) {
 
 // data: { total, onlineCount, cajaCount, cajaNames, losCount, powerFailCount,
 //         telegramText, csvText, fileName }
-function renderCaptured(data) {
+function renderCaptured(data, options = {}) {
   hideAllHomeBoxes();
 
-  csvCapturedBadge.hidden = false;
+  // La captura queda disponible internamente; su confirmación visual vive en
+  // la bandeja de avisos y no como un cartel permanente del home.
+  csvCapturedBadge.hidden = true;
   compactStats.hidden = false;
 
   sumTotal.textContent = String(data.total);
@@ -266,6 +330,13 @@ function renderCaptured(data) {
   currentCsvText = data.csvText || null;
   currentFileName = data.fileName || null;
   currentCapturedAt = data.capturedAt || null;
+  currentDataIdentity =
+    data.dataIdentity ||
+    SmartOLTShared.buildDataIdentity(
+      data.csvText ? SmartOLTShared.parseRecordsFromCSV(data.csvText).records || [] : [],
+      { capturedAt: data.capturedAt }
+    );
+  clearGeneratedTextPreview();
 
   copyFeedback.hidden = true;
   clienteFeedback.hidden = true;
@@ -273,16 +344,17 @@ function renderCaptured(data) {
 
   capturedBox.hidden = false;
   showScreen("home");
+  if (options.notify) showCsvCapturedNotification(data);
 }
 
-function applyStoredState(state) {
+function applyStoredState(state, options = {}) {
   if (!state || !state.status) {
     renderNoCsv();
     return;
   }
   switch (state.status) {
     case "captured":
-      renderCaptured(state);
+      renderCaptured(state, options);
       break;
     case "over_limit":
       renderOverLimit(state.count, state.fileName);
@@ -306,13 +378,508 @@ async function loadStateFromStorage() {
   }
 }
 
+async function loadUpdateStatus() {
+  try {
+    const stored = await chrome.storage.session.get(UPDATE_STATUS_KEY);
+    const value = stored && stored[UPDATE_STATUS_KEY];
+    if (!value) return;
+    const labels = {
+      requesting: "🔄 Solicitando actualización...",
+      generating: "⏳ Generando datos...",
+      processing: "⏳ Procesando datos...",
+      completed: "",
+      failed: "⚠️ No se pudo completar la actualización",
+    };
+    setUpdateStatusText(labels[value.status] || "", value.status);
+    updateDataBtn.disabled = ["requesting", "generating", "processing"].includes(value.status);
+  } catch (e) {
+    // La pantalla principal sigue funcionando aunque no exista estado de proceso.
+  }
+}
+
+async function getActiveTab() {
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tabs && tabs[0] ? tabs[0] : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function readConfiguredCajaSelection() {
+  const select = document.getElementById("odb");
+  if (!select || !(select instanceof HTMLSelectElement)) return { found: false, cajas: [] };
+  return {
+    found: true,
+    cajas: Array.from(select.selectedOptions).map((option) => ({
+      value: option.value || "",
+      text: option.textContent || "",
+    })),
+  };
+}
+
+function clickConfiguredExport() {
+  const button = document.getElementById("export-selection");
+  if (!button) return false;
+  button.click();
+  return true;
+}
+
+// Lee la caja/NAP que SmartOLT está mostrando en la pestaña activa sin hacer
+// clicks ni consultas de red. En /onu/configured la fuente primaria es #odb;
+// en una ficha u otra vista compatible se usa la etiqueta NAP (Divisor).
+function readCurrentCajaContext() {
+  function norm(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function textOf(element) {
+    return norm(element && element.textContent);
+  }
+
+  function valueNearLabel(element) {
+    const row = element.closest("tr");
+    if (row) {
+      const cells = Array.from(row.children);
+      const index = cells.indexOf(element);
+      for (let i = index + 1; i < cells.length; i++) {
+        const value = textOf(cells[i]);
+        if (value) return value;
+      }
+    }
+
+    const raw = textOf(element);
+    const inline = raw.match(/:\s*(.+)$/);
+    if (inline && inline[1]) return norm(inline[1]);
+
+    const sibling = element.nextElementSibling;
+    if (sibling && textOf(sibling)) return textOf(sibling);
+
+    const parent = element.parentElement;
+    if (parent && parent.children.length === 2) {
+      const other = Array.from(parent.children).find((child) => child !== element);
+      if (other && textOf(other)) return textOf(other);
+    }
+    return null;
+  }
+
+  const select = document.getElementById("odb");
+  if (select) {
+    return {
+      source: "odb",
+      ready: true,
+      cajas: Array.from(select.selectedOptions).map((option) => option.textContent || ""),
+    };
+  }
+
+  const napLabelRe = /^nap\s*\(\s*divisor\s*\)$/i;
+  const elements = Array.from(document.querySelectorAll("th,td,dt,label,span,div,strong,b,p"));
+  for (const element of elements) {
+    const raw = textOf(element);
+    const inline = raw.match(/^nap\s*\(\s*divisor\s*\)\s*:\s*(.+)$/i);
+    if (inline && inline[1]) return { source: "nap", ready: true, cajas: [inline[1]] };
+    const label = raw.replace(/:\s*$/, "");
+    if (!napLabelRe.test(label)) continue;
+    const value = valueNearLabel(element);
+    if (value) return { source: "nap", ready: true, cajas: [value] };
+  }
+
+  return { source: null, ready: false, cajas: [] };
+}
+
+async function getCurrentCajaContext(tab) {
+  if (!tab || (!SmartOLTShared.isOnuConfiguredPageUrl(tab.url) && !SmartOLTShared.isClientPageUrl(tab.url))) {
+    return { status: "unsupported", cajas: [] };
+  }
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const result = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: readCurrentCajaContext,
+      });
+      const context = result && result[0] && result[0].result;
+      if (context && context.ready) {
+        return {
+          status: context.cajas.length > 0 ? "identified" : "empty",
+          cajas: context.cajas
+            .map((caja) => SmartOLTShared.parseCajaPortLabel(caja).caja)
+            .map((caja) => SmartOLTShared.normalizeCajaName(caja))
+            .filter(Boolean),
+        };
+      }
+    } catch (e) {
+      // La página puede estar navegando o el DOM puede todavía no estar listo.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+
+  return { status: "not_ready", cajas: [] };
+}
+
+async function getConfiguredCajaSelection(tab) {
+  if (!tab || !SmartOLTShared.isOnuConfiguredPageUrl(tab.url)) return null;
+  try {
+    const result = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: readConfiguredCajaSelection,
+    });
+    return result && result[0] ? result[0].result : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function formatCajaNames(names) {
+  return (names || []).join(", ") || "(sin caja identificable)";
+}
+
+function setUpdateStatusText(text, state) {
+  if (state === "stale" || state === "error") {
+    updateStatus.hidden = true;
+    showOperationalNotification({
+      id: `${state}:${text}`,
+      summary: shortOperationalSummary(text),
+      detail: text,
+      priority: state === "error" ? 100 : 90,
+    });
+    return;
+  }
+  if (state === "completed") clearOperationalCondition();
+  updateStatus.textContent = text;
+  updateStatus.dataset.state = state || "idle";
+  updateStatus.hidden = !text;
+}
+
+function clearGeneratedTextPreview() {
+  generatedTextPreview.value = "";
+}
+
+function showGeneratedText(text) {
+  generatedTextPreview.value = String(text || "");
+}
+
+function toggleGeneratedPreview() {
+  const isExpanded = generatedPreviewToggle.getAttribute("aria-expanded") === "true";
+  setGeneratedPreviewExpanded(!isExpanded);
+  chrome.storage.local
+    .set({ [GENERATED_PREVIEW_STATE_KEY]: !isExpanded })
+    .catch(() => {});
+}
+
+function setGeneratedPreviewExpanded(expanded) {
+  const value = Boolean(expanded);
+  generatedPreviewToggle.setAttribute("aria-expanded", String(value));
+  generatedPreviewIcon.textContent = value ? "▲" : "▼";
+  generatedTextPreview.hidden = !value;
+}
+
+async function loadGeneratedPreviewPreference() {
+  try {
+    const stored = await chrome.storage.local.get(GENERATED_PREVIEW_STATE_KEY);
+    if (typeof stored[GENERATED_PREVIEW_STATE_KEY] === "boolean") {
+      setGeneratedPreviewExpanded(stored[GENERATED_PREVIEW_STATE_KEY]);
+    }
+  } catch (e) {
+    // El estado inicial cerrado sigue siendo válido si storage.local no responde.
+  }
+}
+
+function clearOperationalCondition() {
+  if (
+    activeOperationalNotice &&
+    !["stale:", "error:"].some((prefix) => activeOperationalNotice.id.startsWith(prefix))
+  ) {
+    return;
+  }
+  if (operationalNoticeTimer) {
+    clearTimeout(operationalNoticeTimer);
+    operationalNoticeTimer = null;
+  }
+  activeOperationalNotice = null;
+  operationalNoticeSeenKey = null;
+  refreshNotificationDisplay();
+}
+
+function dismissOperationalNotice() {
+  if (operationalNoticeTimer) {
+    clearTimeout(operationalNoticeTimer);
+    operationalNoticeTimer = null;
+  }
+  activeOperationalNotice = null;
+  refreshNotificationDisplay();
+}
+
+function shortOperationalSummary(text) {
+  const staleMatch = String(text || "").match(/la página muestra ([^.]+?)(?: y el CSV|\.)/i);
+  if (staleMatch) return `⚠️ Datos desactualizados: la página muestra ${staleMatch[1]}.`;
+  return String(text || "").length > 125 ? `${String(text).slice(0, 122)}...` : String(text || "");
+}
+
+function showOperationalNotification({ id, summary, detail, priority = 100 }) {
+  if (operationalNoticeSeenKey === id) return;
+  if (activeOperationalNotice && activeOperationalNotice.priority > priority) return;
+  operationalNoticeSeenKey = id;
+  if (operationalNoticeTimer) clearTimeout(operationalNoticeTimer);
+  activeOperationalNotice = { id, summary, detail, priority, kind: "operational" };
+  refreshNotificationDisplay();
+  operationalNoticeTimer = setTimeout(() => {
+    dismissOperationalNotice();
+  }, OPERATIONAL_NOTICE_DURATION_MS);
+}
+
+function showCsvCapturedNotification(data) {
+  const capturedKey = `${data.fileName || "csv"}:${data.capturedAt || "latest"}:${data.csvText ? data.csvText.length : 0}`;
+  showOperationalNotification({
+    id: `csv-captured:${capturedKey}`,
+    summary: "✅ CSV capturado correctamente.",
+    detail: "✅ CSV capturado correctamente. Los datos ya están disponibles para consultar las cajas o los clientes.",
+    priority: 40,
+  });
+}
+
+function refreshNotificationDisplay() {
+  const notification = activeOperationalNotice || pendingVersionNotifications[0] || null;
+  if (!notification) {
+    notificationBox.hidden = true;
+    notificationDetail.hidden = true;
+    notificationDetailBtn.hidden = true;
+    notificationDetailBtn.setAttribute("aria-expanded", "false");
+    notificationCloseBtn.hidden = true;
+    notificationAcknowledgeBtn.hidden = true;
+    return;
+  }
+
+  const isOperational = notification.kind === "operational";
+  notificationBox.hidden = false;
+  notificationBox.dataset.kind = isOperational ? "operational" : "version";
+  notificationSummary.textContent = notification.summary;
+  notificationDetail.textContent = notification.detail || "";
+  notificationDetail.hidden = true;
+  notificationDetailBtn.hidden = !notification.detail;
+  notificationDetailBtn.setAttribute("aria-expanded", "false");
+  notificationCloseBtn.hidden = !isOperational;
+  notificationAcknowledgeBtn.hidden = isOperational;
+}
+
+function toggleNotificationDetail() {
+  notificationDetail.hidden = !notificationDetail.hidden;
+  notificationDetailBtn.setAttribute("aria-expanded", String(!notificationDetail.hidden));
+}
+
+function getCurrentVersionNotifications() {
+  const entry = SmartOLTShared.CHANGELOG_ENTRIES.find((item) => item.version === extensionVersion);
+  return (entry && entry.notifications ? entry.notifications : []).map((notification) => ({
+    ...notification,
+    version: entry.version,
+    kind: "version",
+  }));
+}
+
+async function initializeNotifications() {
+  const now = Date.now();
+  const currentNotifications = getCurrentVersionNotifications();
+  try {
+    const stored = await chrome.storage.local.get(NOTIFICATION_STATE_KEY);
+    notificationState = stored && stored[NOTIFICATION_STATE_KEY] ? stored[NOTIFICATION_STATE_KEY] : {};
+  } catch (e) {
+    notificationState = {};
+  }
+
+  let changed = false;
+  let testResetApplied = false;
+  try {
+    const resetState = await chrome.storage.local.get(NOTIFICATION_TEST_RESET_KEY);
+    testResetApplied = !!resetState[NOTIFICATION_TEST_RESET_KEY];
+  } catch (e) {
+    // Si no se puede leer el marcador, no se repite el reset en memoria.
+  }
+
+  if (!testResetApplied) {
+    delete notificationState["update-csv-3.0.9"];
+    changed = true;
+  }
+
+  currentNotifications.forEach((notification) => {
+    if (!notificationState[notification.id]) {
+      notificationState[notification.id] = { firstSeenAt: now, readAt: null };
+      changed = true;
+    }
+  });
+
+  if (changed) {
+    try {
+      await chrome.storage.local.set({
+        [NOTIFICATION_STATE_KEY]: notificationState,
+        [NOTIFICATION_TEST_RESET_KEY]: Date.now(),
+      });
+    } catch (e) {
+      // La novedad sigue disponible durante esta sesión aunque local no responda.
+    }
+  }
+
+  pendingVersionNotifications = currentNotifications
+    .filter((notification) => {
+      const state = notificationState[notification.id];
+      return state && !state.readAt && now - state.firstSeenAt < NOTIFICATION_MAX_AGE_MS;
+    })
+    .sort((a, b) => (b.priority || 0) - (a.priority || 0));
+  refreshNotificationDisplay();
+}
+
+async function acknowledgeCurrentNotification() {
+  const notification = pendingVersionNotifications[0];
+  if (!notification) return;
+  notificationState[notification.id] = {
+    ...(notificationState[notification.id] || {}),
+    readAt: Date.now(),
+  };
+  pendingVersionNotifications = pendingVersionNotifications.filter((item) => item.id !== notification.id);
+  try {
+    await chrome.storage.local.set({ [NOTIFICATION_STATE_KEY]: notificationState });
+  } catch (e) {
+    // Se mantiene quitada durante esta sesión; el siguiente acceso intentará persistirla.
+  }
+  refreshNotificationDisplay();
+}
+
+function renderChangelog() {
+  changelogContent.textContent = "";
+  SmartOLTShared.CHANGELOG_ENTRIES.forEach((versionEntry) => {
+    const versionSection = document.createElement("section");
+    versionSection.className = "changelog-version";
+
+    const title = document.createElement("h3");
+    title.className = "changelog-version-title";
+    title.textContent = `v${versionEntry.version}`;
+    versionSection.appendChild(title);
+
+    versionEntry.changes.forEach((change) => {
+      const entry = document.createElement("p");
+      entry.className = "changelog-entry";
+      const changeTitle = document.createElement("strong");
+      changeTitle.textContent = change.title;
+      entry.appendChild(changeTitle);
+      entry.appendChild(document.createTextNode(change.text));
+      versionSection.appendChild(entry);
+    });
+
+    changelogContent.appendChild(versionSection);
+  });
+}
+
+function showChangelog() {
+  renderChangelog();
+  showScreen("changelog");
+}
+
+async function removePendingRequest(requestId) {
+  try {
+    const stored = await chrome.storage.session.get(PENDING_EXPORTS_KEY);
+    const pending = Array.isArray(stored[PENDING_EXPORTS_KEY]) ? stored[PENDING_EXPORTS_KEY] : [];
+    await chrome.storage.session.set({
+      [PENDING_EXPORTS_KEY]: pending.filter((request) => request.requestId !== requestId),
+    });
+  } catch (e) {
+    // Si el popup se cierra, background.js seguirá controlando la expiración.
+  }
+}
+
+async function runUpdateFlow() {
+  updateDataBtn.disabled = true;
+  setUpdateStatusText("🔄 Solicitando actualización...", "requesting");
+
+  const tab = await getActiveTab();
+  if (!tab || !SmartOLTShared.isOnuConfiguredPageUrl(tab.url)) {
+    updateDataBtn.disabled = false;
+    setUpdateStatusText("⚠️ Abrí /onu/configured en SmartOLT.", "error");
+    return;
+  }
+
+  const selection = await getConfiguredCajaSelection(tab);
+  let exportButtonExists = false;
+  try {
+    const result = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => !!document.getElementById("export-selection"),
+    });
+    exportButtonExists = !!(result && result[0] && result[0].result);
+  } catch (e) {
+    exportButtonExists = false;
+  }
+
+  if (!exportButtonExists) {
+    updateDataBtn.disabled = false;
+    setUpdateStatusText("⚠️ No se pudo iniciar la actualización", "error");
+    return;
+  }
+
+  const request = {
+    requestId: crypto.randomUUID(),
+    tabId: tab.id,
+    host: new URL(tab.url).hostname.toLowerCase(),
+    pageUrl: tab.url,
+    cajaNames: (selection && selection.cajas || [])
+      .map((caja) => SmartOLTShared.normalizeCajaName(caja.text))
+      .filter(Boolean),
+    requestedAt: Date.now(),
+    expiresAt: Date.now() + REQUEST_TTL_MS,
+    status: "registered",
+  };
+
+  try {
+    const stored = await chrome.storage.session.get(PENDING_EXPORTS_KEY);
+    const now = Date.now();
+    const pending = Array.isArray(stored[PENDING_EXPORTS_KEY]) ? stored[PENDING_EXPORTS_KEY] : [];
+    const valid = pending.filter((item) => item && item.expiresAt > now && item.tabId !== tab.id);
+    await chrome.storage.session.set({
+      [PENDING_EXPORTS_KEY]: [...valid, request],
+      [UPDATE_STATUS_KEY]: { status: "requesting", requestId: request.requestId, updatedAt: now },
+    });
+  } catch (e) {
+    updateDataBtn.disabled = false;
+    setUpdateStatusText("⚠️ No se pudo iniciar la actualización", "error");
+    return;
+  }
+
+  try {
+    const result = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: clickConfiguredExport,
+    });
+    if (!(result && result[0] && result[0].result)) throw new Error("export-button-missing");
+    setUpdateStatusText("⏳ Generando datos...", "generating");
+  } catch (e) {
+    await removePendingRequest(request.requestId);
+    updateDataBtn.disabled = false;
+    setUpdateStatusText("⚠️ No se pudo iniciar la actualización", "error");
+  }
+}
+
 // Si mientras el popup está abierto llega una captura nueva en segundo plano
 // (el usuario exportó justo ahora), se refleja sola — no hace falta cerrar y
 // volver a abrir. Esto no dispara ningún procesamiento: solo redibuja lo que
 // background.js ya calculó y guardó.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "session" || !changes[STORAGE_KEY]) return;
-  applyStoredState(changes[STORAGE_KEY].newValue);
+  applyStoredState(changes[STORAGE_KEY].newValue, { notify: true });
+  refreshCurrentDataContext();
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "session" || !changes[UPDATE_STATUS_KEY]) return;
+  const value = changes[UPDATE_STATUS_KEY].newValue;
+  if (!value) return;
+  const labels = {
+    requesting: "🔄 Solicitando actualización...",
+    generating: "⏳ Generando datos...",
+    processing: "⏳ Procesando datos...",
+    completed: "",
+    failed: "⚠️ No se pudo completar la actualización",
+  };
+  setUpdateStatusText(labels[value.status] || "", value.status);
+  updateDataBtn.disabled = value.status === "requesting" || value.status === "generating" || value.status === "processing";
+  if (value.status === "completed") refreshCurrentDataContext();
 });
 
 // =========================================================================
@@ -406,7 +973,7 @@ function handleFile(file) {
         csvText: text,
         fileName: file.name,
         capturedAt: file.lastModified || null,
-      });
+      }, { notify: true });
     } catch (err) {
       showError("⚠️ No se pudo identificar la estructura del archivo de SmartOLT.", [
         "Ocurrió un error inesperado al leer el archivo.",
@@ -511,7 +1078,7 @@ async function runAutoDetectFlow() {
         capturedAt: itemStartTime,
       };
       await saveOfficialState(officialState);
-      renderCaptured(officialState);
+      renderCaptured(officialState, { notify: true });
       found = true;
       break;
     }
@@ -533,58 +1100,10 @@ async function runAutoDetectFlow() {
 }
 
 // =========================================================================
-// Cierre automático del popup al perder el foco (v3.0.4, corregido en v3.0.5)
-// =========================================================================
-// Chrome ya cierra el popup de la extensión al hacer click fuera de él en la
-// gran mayoría de los casos, pero en algunos entornos/versiones eso no
-// ocurre de forma confiable y el popup queda abierto hasta volver a tocar el
-// ícono. El mecanismo estándar para forzar ese comportamiento es escuchar el
-// evento "blur" de window (se dispara cuando el popup deja de tener foco:
-// click en la página de SmartOLT, en otra pestaña o en otra ventana) y
-// cerrar el popup con window.close().
-//
-// OJO 1: NO se puede cerrar ciegamente en cada "blur". El botón "📄 Procesar
-// otro CSV" abre el selector de archivos NATIVO del sistema operativo
-// (fileInput.click()), y abrir ese diálogo también le quita el foco a la
-// ventana del popup — un "blur" ciego cerraría el popup ANTES de que el
-// usuario llegue a elegir el archivo, rompiendo esa función por completo.
-// Por eso se usa una bandera: se suspende el auto-cierre justo antes de
-// abrir el selector de archivos, y se reactiva en cuanto el popup vuelve a
-// tener foco (al cerrarse el diálogo nativo, con o sin archivo elegido).
-//
-// OJO 2 (corrección v3.0.5): un click DENTRO del popup sobre una zona SIN
-// foco propio (texto, chip, footer, espacio vacío — cualquier elemento que
-// no sea un botón/input/link) puede disparar un "blur" de window igual de
-// espurio/transitorio, aunque el usuario nunca haya salido del popup. Por
-// eso el cierre NO es inmediato: se espera un instante (setTimeout 0) y
-// recién ahí se confirma con document.hasFocus() si el popup realmente
-// perdió el foco hacia afuera. Si el click fue interno, el popup sigue
-// siendo la ventana activa y document.hasFocus() vuelve a ser true casi al
-// instante — en ese caso NO se cierra. Si el click fue realmente afuera
-// (otra pestaña, la página de SmartOLT, otra ventana), document.hasFocus()
-// sigue en false y el popup se cierra como corresponde.
-let suppressAutoCloseOnBlur = false;
-
-window.addEventListener("blur", () => {
-  if (suppressAutoCloseOnBlur) return;
-  setTimeout(() => {
-    if (suppressAutoCloseOnBlur) return;
-    if (!document.hasFocus()) {
-      window.close();
-    }
-  }, 0);
-});
-
-window.addEventListener("focus", () => {
-  suppressAutoCloseOnBlur = false;
-});
-
-// =========================================================================
 // Eventos
 // =========================================================================
 
 selectBtn.addEventListener("click", () => {
-  suppressAutoCloseOnBlur = true;
   fileInput.click();
 });
 
@@ -595,9 +1114,27 @@ fileInput.addEventListener("change", (e) => {
 });
 
 autoDetectBtn.addEventListener("click", runAutoDetectFlow);
+updateDataBtn.addEventListener("click", runUpdateFlow);
+generatedPreviewToggle.addEventListener("click", toggleGeneratedPreview);
 
 backToHomeBtn.addEventListener("click", () => {
   loadStateFromStorage();
+});
+
+notificationDetailBtn.addEventListener("click", toggleNotificationDetail);
+notificationCloseBtn.addEventListener("click", dismissOperationalNotice);
+notificationAcknowledgeBtn.addEventListener("click", acknowledgeCurrentNotification);
+backFromChangelogBtn.addEventListener("click", loadStateFromStorage);
+versionChangelogLink.addEventListener("click", (e) => {
+  e.stopPropagation();
+  showChangelog();
+});
+versionChangelogLink.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+    e.preventDefault();
+    e.stopPropagation();
+    showChangelog();
+  }
 });
 
 // ---------- Copiar al portapapeles (con respaldo textarea+execCommand si la
@@ -641,6 +1178,104 @@ function getCurrentRecords() {
   return parsed.ok ? SmartOLTShared.consolidateRecordsBySerial(parsed.records) : null;
 }
 
+function getLoadedCajaNames() {
+  if (currentDataIdentity && Array.isArray(currentDataIdentity.cajaNames)) {
+    return currentDataIdentity.cajaNames.map((name) => SmartOLTShared.normalizeCajaName(name)).filter(Boolean);
+  }
+  const records = getCurrentRecords() || [];
+  return SmartOLTShared.buildDataIdentity(records).cajaNames;
+}
+
+let contextRefreshInFlight = false;
+
+async function refreshCurrentDataContext() {
+  if (!currentCsvText || contextRefreshInFlight) return;
+  if (["requesting", "generating", "processing"].includes(updateStatus.dataset.state)) return;
+
+  contextRefreshInFlight = true;
+  try {
+    const tab = await getActiveTab();
+    const context = await getCurrentCajaContext(tab);
+    if (context.status === "unsupported") {
+      renderCajaNamesWithContext(null);
+      return;
+    }
+
+    if (context.status === "not_ready") {
+      renderCajaNamesWithContext(null);
+      setUpdateStatusText("⚠️ No se pudo identificar la caja actual.", "stale");
+      return;
+    }
+
+    if (context.status === "empty") {
+      renderCajaNamesWithContext(null);
+      setUpdateStatusText("⚠️ No hay una caja seleccionada actualmente.", "stale");
+      return;
+    }
+
+    const available = getLoadedCajaNames();
+    const missing = context.cajas.filter((caja) => !available.includes(caja));
+    renderCajaNamesWithContext(context.cajas);
+    if (missing.length > 0) {
+      setUpdateStatusText(
+        `⚠️ Datos desactualizados: la página muestra ${formatCajaNames(missing)} y el CSV contiene ${formatCajaNames(available)}. 🔄 Actualizar datos`,
+        "stale"
+      );
+      return;
+    }
+
+    setUpdateStatusText("", "completed");
+  } finally {
+    contextRefreshInFlight = false;
+  }
+}
+
+function dataMismatchFeedback(availableNames, currentName) {
+  return `⚠️ La caja ${currentName} no está en los datos cargados. 🔄 Actualizá los datos.`;
+}
+
+async function validateConfiguredCajaAgainstData() {
+  if (!currentCsvText) {
+    return { ok: false, message: "⚠️ No hay datos capturados. Usá 🔄 Actualizar datos." };
+  }
+  const tab = await getActiveTab();
+  if (!tab || !SmartOLTShared.isOnuConfiguredPageUrl(tab.url)) {
+    return { ok: false, message: "⚠️ Abrí /onu/configured en SmartOLT antes de consultar una caja." };
+  }
+
+  const selection = await getConfiguredCajaSelection(tab);
+  const selected = (selection && selection.cajas || [])
+    .map((caja) => SmartOLTShared.normalizeCajaName(caja.text))
+    .filter(Boolean);
+  if (selected.length === 0) {
+    return { ok: false, message: "⚠️ No se pudo identificar una caja actual en SmartOLT." };
+  }
+  const available = getLoadedCajaNames();
+  const missing = selected.filter((caja) => !available.includes(caja));
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      message: `⚠️ Los datos no incluyen las cajas seleccionadas: ${formatCajaNames(missing)}. Datos disponibles: ${formatCajaNames(available)}. 🔄 Actualizar datos`,
+    };
+  }
+  return { ok: true, cajas: selected };
+}
+
+function validateClientCajaAgainstData(caja) {
+  if (!SmartOLTShared.normalizeCajaName(caja)) {
+    return { ok: true };
+  }
+  if (!currentCsvText) {
+    return { ok: true };
+  }
+  const current = SmartOLTShared.normalizeCajaName(caja);
+  const available = getLoadedCajaNames();
+  if (!available.includes(current)) {
+    return { ok: true, message: dataMismatchFeedback(available, current) };
+  }
+  return { ok: true };
+}
+
 // ---------- ESTADO DE CAJA/S: arma (y copia) el reporte COMPLETO de TODAS las
 // cajas del CSV ya capturado — promedio, puertos ocupados, Online, estado
 // problemático (LOS/Power fail) con su detalle, y advertencias de registros
@@ -649,6 +1284,14 @@ function getCurrentRecords() {
 // ya usa el resto de la extensión); el texto del botón (singular/plural) se
 // actualiza en renderCaptured según la cantidad de cajas detectadas. ----------
 consultarCajasBtn.addEventListener("click", async () => {
+  clearGeneratedTextPreview();
+  const freshness = await validateConfiguredCajaAgainstData();
+  if (!freshness.ok) {
+    copyFeedback.textContent = freshness.message;
+    copyFeedback.hidden = false;
+    return;
+  }
+
   const records = getCurrentRecords();
   if (!records) {
     copyFeedback.textContent = "⚠️ No hay ningún CSV capturado.";
@@ -664,6 +1307,7 @@ consultarCajasBtn.addEventListener("click", async () => {
   // la hora actual de este click — se antepone una sola vez, no dentro de
   // cada caja (ver prependCsvTimestamp en shared.js).
   const reportText = SmartOLTShared.prependCsvTimestamp(SmartOLTShared.buildTelegramText(records), currentCapturedAt);
+  showGeneratedText(reportText);
   const copied = await copyTextToClipboard(reportText);
   copyFeedback.textContent = copied ? "✓ Copiado" : "⚠️ No se pudo copiar automáticamente";
   copyFeedback.hidden = false;
@@ -871,6 +1515,7 @@ function injectedExtractClientData() {
 }
 
 async function handleObtenerCliente() {
+  clearGeneratedTextPreview();
   clienteFeedback.textContent = "Buscando datos del cliente…";
   clienteFeedback.hidden = false;
 
@@ -923,6 +1568,9 @@ async function handleObtenerCliente() {
     clientData.puerto = null;
   }
 
+  const freshness = validateClientCajaAgainstData(clientData.caja);
+  if (freshness.message) setUpdateStatusText(freshness.message, "stale");
+
   // El promedio de caja sale del MISMO CSV ya capturado (sin volver a
   // consultar SmartOLT). buildClientReport devuelve { text, cajaWarning }:
   // "text" es EXACTAMENTE lo que se copia (nunca incluye avisos de caja ni
@@ -932,6 +1580,7 @@ async function handleObtenerCliente() {
   const records = getCurrentRecords();
   const result = SmartOLTShared.buildClientReport(clientData, records);
 
+  showGeneratedText(result.text);
   const copied = await copyTextToClipboard(result.text);
   if (!copied) {
     clienteFeedback.textContent = "⚠️ No se pudo copiar automáticamente";
@@ -1009,6 +1658,22 @@ async function refreshClienteBtnState() {
   obtenerClienteBtn.classList.toggle("btn-client-disabled", !isClientPage);
 }
 
+async function refreshUpdateBtnState() {
+  const tab = await getActiveTab();
+  const compatible = !!(tab && SmartOLTShared.isOnuConfiguredPageUrl(tab.url));
+  let activeRequest = false;
+  try {
+    const stored = await chrome.storage.session.get(UPDATE_STATUS_KEY);
+    activeRequest = ["requesting", "generating", "processing"].includes(
+      stored && stored[UPDATE_STATUS_KEY] && stored[UPDATE_STATUS_KEY].status
+    );
+  } catch (e) {
+    activeRequest = false;
+  }
+  updateDataBtn.disabled = !compatible || activeRequest;
+  updateDataBtn.title = compatible ? "" : "Abrí /onu/configured en SmartOLT para actualizar los datos.";
+}
+
 // La pestaña activa puede cambiar de URL (o el usuario puede cambiar de
 // pestaña) mientras el popup sigue abierto, así que el estado del botón se
 // vuelve a calcular ante esos dos eventos, además de al abrir el popup.
@@ -1016,12 +1681,16 @@ if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onUpdated) {
   chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (changeInfo.url || changeInfo.status === "complete") {
       refreshClienteBtnState();
+      refreshUpdateBtnState();
+      refreshCurrentDataContext();
     }
   });
 }
 if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.onActivated) {
   chrome.tabs.onActivated.addListener(() => {
     refreshClienteBtnState();
+    refreshUpdateBtnState();
+    refreshCurrentDataContext();
   });
 }
 
@@ -1046,7 +1715,18 @@ const extensionVersion =
 // oculto (no hay frase que mostrar).
 function renderTeamSignature() {
   const { line1, line2 } = SmartOLTShared.getFooterSignatureContent(new Date(), extensionVersion);
-  teamSignatureLine1.textContent = line1;
+  const versionLabel = extensionVersion ? `v${extensionVersion}` : null;
+  const versionIndex = versionLabel ? line1.indexOf(versionLabel) : -1;
+  if (versionIndex >= 0) {
+    teamSignatureLine1.textContent = line1.slice(0, versionIndex);
+    versionChangelogLink.textContent = `[${versionLabel} 👀]`;
+    versionChangelogLink.hidden = false;
+    teamSignatureCreatedBy.textContent = line1.slice(versionIndex + versionLabel.length);
+  } else {
+    teamSignatureLine1.textContent = line1;
+    versionChangelogLink.hidden = true;
+    teamSignatureCreatedBy.textContent = "";
+  }
   if (line2) {
     teamSignatureLine2.textContent = line2;
     teamSignatureLine2.hidden = false;
@@ -1100,6 +1780,9 @@ teamSignature.addEventListener("keydown", (e) => {
 
 // ---------- Estado inicial: SOLO lee lo que ya está guardado. No procesa ni
 // consulta nada por su cuenta. ----------
-loadStateFromStorage();
+Promise.all([loadStateFromStorage(), loadUpdateStatus(), initializeNotifications(), loadGeneratedPreviewPreference()]).then(() =>
+  refreshCurrentDataContext()
+);
 refreshClienteBtnState();
+refreshUpdateBtnState();
 renderTeamSignature();

@@ -3,9 +3,9 @@
 /**
  * SmartOLT — Control de ONUs — service worker (Manifest V3)
  *
- * ÚNICA responsabilidad: detectar cuando el USUARIO exporta un CSV desde la
- * propia interfaz de SmartOLT (botón "Exportar") y capturar ese CSV en
- * memoria de sesión, sin volver a tocar SmartOLT para nada más.
+ * Captura únicamente una exportación previamente iniciada por el botón de esta
+ * extensión. Las exportaciones iniciadas directamente en SmartOLT pasan sin
+ * intervención.
  *
  * Este archivo NO:
  *   - hace click en ningún botón de SmartOLT ni simula ninguna acción del usuario;
@@ -27,13 +27,14 @@
  *      (RAM de la sesión de Chrome, nunca disco; se pierde solo si se cierra
  *      Chrome del todo).
  *
- * Nunca se toca ninguna otra descarga del usuario: si la URL no matchea el
- * patrón exacto de exportación de SmartOLT, este listener no hace nada.
+ * La URL final es solo una señal candidata: no autoriza la captura por sí sola.
  */
 
 importScripts("shared.js");
 
 const STORAGE_KEY = "smartoltState";
+const PENDING_EXPORTS_KEY = "smartoltPendingExports";
+const UPDATE_STATUS_KEY = "smartoltUpdateStatus";
 
 // Acepta cualquier subdominio de smartolt.com (ej. obercom.smartolt.com), no
 // un dominio hardcodeado, para no atarse a un solo reseller.
@@ -83,14 +84,101 @@ async function saveState(state) {
   }
 }
 
+async function saveUpdateStatus(status, request, extra = {}) {
+  try {
+    await chrome.storage.session.set({
+      [UPDATE_STATUS_KEY]: {
+        status,
+        requestId: request && request.requestId,
+        updatedAt: Date.now(),
+        ...extra,
+      },
+    });
+  } catch (e) {
+    // El procesamiento no depende de que el popup siga abierto.
+  }
+}
+
+let claimQueue = Promise.resolve();
+
+function claimPendingExport(item) {
+  const operation = claimQueue.then(async () => {
+    let stored;
+    try {
+      stored = await chrome.storage.session.get(PENDING_EXPORTS_KEY);
+    } catch (e) {
+      return null;
+    }
+
+    const now = Date.now();
+    const pending = Array.isArray(stored[PENDING_EXPORTS_KEY]) ? stored[PENDING_EXPORTS_KEY] : [];
+    const valid = pending.filter(
+      (request) =>
+        request &&
+        request.status === "registered" &&
+        Number.isInteger(request.tabId) &&
+        typeof request.requestId === "string" &&
+        request.requestId.length > 0 &&
+        typeof request.host === "string" &&
+        typeof request.pageUrl === "string" &&
+        Number.isFinite(request.requestedAt) &&
+        Number.isFinite(request.expiresAt) &&
+        request.requestedAt <= now &&
+        request.expiresAt > now
+    );
+    const itemUrl = new URL(item.url);
+    const itemHost = itemUrl.hostname.toLowerCase();
+    let candidates = valid.filter((request) => String(request.host || "").toLowerCase() === itemHost);
+
+    // Sin referrer no existe una asociación segura entre la descarga y la
+    // pestaña que registró la solicitud. En ese caso se prioriza el falso
+    // negativo y la descarga sigue su curso normal.
+    if (!item.referrer) {
+      await chrome.storage.session.set({ [PENDING_EXPORTS_KEY]: valid });
+      return null;
+    }
+
+    try {
+      const referrerUrl = new URL(item.referrer);
+      const referrerHost = referrerUrl.hostname.toLowerCase();
+      candidates = candidates.filter((request) => {
+        try {
+          const pageUrl = new URL(request.pageUrl);
+          return pageUrl.hostname.toLowerCase() === referrerHost && pageUrl.pathname === referrerUrl.pathname;
+        } catch (e) {
+          return false;
+        }
+      });
+    } catch (e) {
+      candidates = [];
+    }
+
+    // Si más de una solicitud podría corresponder, se elige no capturar.
+    if (candidates.length !== 1) {
+      await chrome.storage.session.set({ [PENDING_EXPORTS_KEY]: valid });
+      return null;
+    }
+
+    const request = candidates[0];
+    const remaining = valid.filter((candidate) => candidate.requestId !== request.requestId);
+    await chrome.storage.session.set({ [PENDING_EXPORTS_KEY]: remaining });
+    return request;
+  });
+
+  claimQueue = operation.catch(() => null);
+  return operation;
+}
+
 // Descarga y procesa el CSV que SmartOLT ya generó (job creado y autenticado
 // por la propia SmartOLT, no por nosotros). Es el único fetch que hacemos.
-async function captureExport(downloadUrl) {
+async function captureExport(downloadUrl, request) {
+  await saveUpdateStatus("processing", request);
   let resp;
   try {
     resp = await fetch(downloadUrl, { credentials: "include" });
   } catch (e) {
     await saveState({ status: "capture_failed", reason: "network", capturedAt: Date.now() });
+    await saveUpdateStatus("failed", request);
     return;
   }
 
@@ -100,6 +188,7 @@ async function captureExport(downloadUrl) {
       reason: `http_${resp.status}`,
       capturedAt: Date.now(),
     });
+    await saveUpdateStatus("failed", request);
     return;
   }
 
@@ -115,6 +204,7 @@ async function captureExport(downloadUrl) {
     // del PON (ver SmartOLTShared.parsePonFromFileName), así el popup puede
     // mostrar de qué PON se trata en el mensaje de "supera el límite".
     await saveState({ status: "over_limit", count: result.count, fileName, capturedAt: Date.now() });
+    await saveUpdateStatus("failed", request);
     return;
   }
 
@@ -124,12 +214,14 @@ async function captureExport(downloadUrl) {
       reason: result.code || "parse_error",
       capturedAt: Date.now(),
     });
+    await saveUpdateStatus("failed", request);
     return;
   }
 
   // Se guarda el CSV crudo (byte a byte tal cual lo devolvió SmartOLT) para que
   // "Descargar último CSV" entregue exactamente ese contenido, sin volver a
   // serializarlo. Reemplaza siempre lo anterior — nunca se acumula.
+  const capturedAt = Date.now();
   await saveState({
     status: "captured",
     csvText,
@@ -141,29 +233,40 @@ async function captureExport(downloadUrl) {
     losCount: result.losCount,
     powerFailCount: result.powerFailCount,
     telegramText: result.telegramText,
-    capturedAt: Date.now(),
+    capturedAt,
+    dataIdentity: self.SmartOLTShared.buildDataIdentity(result.records, {
+      sourceUrl: request.pageUrl,
+      tabId: request.tabId,
+      capturedAt,
+    }),
+    requestedCajaNames: request.cajaNames || [],
   });
+  await saveUpdateStatus("completed", request, { capturedAt });
 }
 
 chrome.downloads.onCreated.addListener((item) => {
   if (!item || !item.url) return;
   if (!isSmartOltExportUrl(item.url)) return; // nunca tocar ninguna otra descarga
 
-  // Intento best-effort de cancelar la descarga física antes de que se guarde
+  claimPendingExport(item).then(async (request) => {
+    if (!request) return;
+
+    await saveUpdateStatus("generating", request);
+
+    // Intento best-effort de cancelar la descarga física antes de que se guarde
   // en Descargas. Si ya se completó (archivo muy chico) o el cancel falla por
   // cualquier motivo, no se rompe nada: igual capturamos nuestra propia copia
   // por fetch más abajo, y el archivo original puede quedar en Descargas además
   // de la copia en memoria — comportamiento documentado, no se intenta borrar
   // nada del disco del usuario.
-  try {
-    chrome.downloads.cancel(item.id, () => {
-      // Se ignora chrome.runtime.lastError a propósito: un cancel que llega
-      // tarde (descarga ya completa) no es un error que debamos reportar.
-      void chrome.runtime.lastError;
-    });
-  } catch (e) {
-    // ignorar
-  }
+    try {
+      chrome.downloads.cancel(item.id, () => {
+        void chrome.runtime.lastError;
+      });
+    } catch (e) {
+      // ignorar
+    }
 
-  captureExport(item.url);
+    await captureExport(item.url, request);
+  });
 });

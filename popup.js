@@ -1248,13 +1248,13 @@ async function validateConfiguredCajaAgainstData() {
     .map((caja) => SmartOLTShared.normalizeCajaName(caja.text))
     .filter(Boolean);
   if (selected.length === 0) {
-    return { ok: false, message: "⚠️ No se pudo identificar una caja actual en SmartOLT." };
+    return { ok: true, message: "⚠️ No hay una caja seleccionada actualmente." };
   }
   const available = getLoadedCajaNames();
   const missing = selected.filter((caja) => !available.includes(caja));
   if (missing.length > 0) {
     return {
-      ok: false,
+      ok: true,
       message: `⚠️ Los datos no incluyen las cajas seleccionadas: ${formatCajaNames(missing)}. Datos disponibles: ${formatCajaNames(available)}. 🔄 Actualizar datos`,
     };
   }
@@ -1291,6 +1291,7 @@ consultarCajasBtn.addEventListener("click", async () => {
     copyFeedback.hidden = false;
     return;
   }
+  if (freshness.message) setUpdateStatusText(freshness.message, "stale");
 
   const records = getCurrentRecords();
   if (!records) {

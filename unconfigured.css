@@ -1,0 +1,8 @@
+[data-smartolt-onu-compatibility-warning] {
+  display: block;
+  margin-top: 4px;
+  color: #b45309;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+}

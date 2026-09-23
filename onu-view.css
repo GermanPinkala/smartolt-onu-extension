@@ -1,0 +1,9 @@
+[data-smartolt-onu-view-compatibility-warning] {
+  display: inline;
+  margin-left: 8px;
+  color: #b45309;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: help;
+}

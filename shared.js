@@ -45,6 +45,78 @@ const SERIAL_COLUMN = "SN";
 
 const TOP_N_SIGNAL = 3;
 
+// OLTs cuya familia puede determinarse con seguridad para comparar el prefijo
+// del serial de la ONU. Los nombres no incluidos no generan ningún aviso.
+const OLT_COMPATIBILITY_GROUPS = {
+  huawei: [
+    "ADH-OLT-D",
+    "MRT-OLT-G",
+    "OBE-OLT-A",
+    "OBE-OLT-B",
+    "OBE-OLT-C",
+    "OBE-OLT-D",
+    "PAZ-OLT-C",
+    "PZA-OLT-A",
+    "SNM-OLT-E",
+    "WND-OLT-A",
+  ],
+  zte: ["ELD-OLT-A", "ITU-OLT-A"],
+};
+
+const ONU_COMPATIBILITY_PREFIXES = {
+  huawei: "HWTC",
+  zte: "ZTEG",
+};
+
+const ONU_OLT_COMPATIBILITY_WARNING = "⚠️ ONU con serial no compatible con la OLT";
+
+// Solo se incluyen IDs confirmados en SmartOLT. Los demás pueden resolverse
+// desde select#olt cuando la página expone un nombre reconocido.
+const SMARTOLT_OLT_ID_MAP = {
+  "13": "ADH-OLT-D",
+  "15": "ITU-OLT-A",
+  "16": "ELD-OLT-A",
+};
+
+// Alias observados en el selector de SmartOLT. No se intenta invertir ni
+// reordenar segmentos del nombre mostrado automáticamente.
+const SMARTOLT_OLT_DISPLAY_NAME_MAP = {
+  "OLT-A-ELD": "ELD-OLT-A",
+};
+
+function resolveSmartoltOltIdentifier(oltId, displayedName) {
+  const id = String(oltId || "").trim();
+  if (SMARTOLT_OLT_ID_MAP[id]) return SMARTOLT_OLT_ID_MAP[id];
+
+  const name = String(displayedName || "")
+    .replace(/^\s*\d+\s*-\s*/, "")
+    .trim()
+    .toUpperCase();
+  if (!name) return null;
+  if (SMARTOLT_OLT_DISPLAY_NAME_MAP[name]) return SMARTOLT_OLT_DISPLAY_NAME_MAP[name];
+
+  const knownName = Object.values(OLT_COMPATIBILITY_GROUPS)
+    .flat()
+    .find((candidate) => candidate === name);
+  return knownName || null;
+}
+
+function getOnuOltCompatibilityWarning(oltName, serial) {
+  const normalizedOlt = String(oltName || "").trim().toUpperCase();
+  const normalizedSerial = String(serial || "").trim().toUpperCase();
+  if (!normalizedOlt || !normalizedSerial) return null;
+
+  const oltFamily = Object.entries(OLT_COMPATIBILITY_GROUPS).find(([, names]) =>
+    names.includes(normalizedOlt)
+  );
+  if (!oltFamily) return null;
+
+  const [family] = oltFamily;
+  return normalizedSerial.startsWith(ONU_COMPATIBILITY_PREFIXES[family])
+    ? null
+    : ONU_OLT_COMPATIBILITY_WARNING;
+}
+
 // Fusible de seguridad ABSOLUTO — es un límite POR PON (128 = capacidad
 // máxima de ONUs de un PON GPON; 128 es válido, 129 ya no lo es). Cada CSV que
 // procesa la extensión corresponde SIEMPRE a la exportación de un único PON
@@ -1012,7 +1084,7 @@ function buildClientEvaluationRecords(csvRecords, clientData) {
 }
 
 // ---------- Reporte completo de "OBTENER DATOS DEL CLIENTE" ----------
-// clientData: { name, caja, puerto, serial, sig1490 (Rx ONU), sig1310 (Rx OLT) },
+// clientData: { name, caja, puerto, serial, oltName, sig1490 (Rx ONU), sig1310 (Rx OLT) },
 // con cualquier campo en null/"" si no se pudo detectar en la página de SmartOLT.
 // csvRecords: records ya parseados del CSV capturado actualmente (o null/[] si
 // no hay ningún CSV capturado todavía). randomFn es opcional (por defecto
@@ -1028,11 +1100,9 @@ function buildClientEvaluationRecords(csvRecords, clientData) {
 // "ESTADO DE CAJA(S)" (buildTelegramText) y duplicarla acá sobrecargaba el
 // mensaje del cliente.
 //
-// Devuelve { text, cajaWarning }: "text" es EXACTAMENTE lo que se copia al
-// portapapeles (nunca incluye avisos sobre la caja, para no romper el formato
-// fijo de arriba); "cajaWarning" es un aviso SOLO para mostrar en la interfaz
-// de la extensión (p. ej. "la caja del cliente no coincide con el CSV") — el
-// llamador decide cómo mostrarlo, pero nunca debe agregarlo al texto copiado.
+// Devuelve { text, cajaWarning, compatibilityWarning }. El aviso de caja es
+// solo visual; el aviso ONU/OLT forma parte del texto copiado para que ambos
+// canales informen exactamente lo mismo.
 // Nunca se inventa un promedio: si no se puede calcular, la línea de
 // "Prom. de caja" queda con el texto fijo "no se pudo obtener promedio de
 // caja" y no se hace comparación óptica.
@@ -1047,6 +1117,7 @@ function buildClientReport(clientData, csvRecords, randomFn) {
   // se marca explícitamente con ⚠️ (ver más abajo).
   const puerto = clientData.puerto || "";
   const serial = clientData.serial || "N/D";
+  const compatibilityWarning = getOnuOltCompatibilityWarning(clientData.oltName, clientData.serial);
   const clientOnu = clientData.sig1490; // Rx ONU -> "OP Cliente"
   const clientOlt = clientData.sig1310; // Rx OLT -> "OP OLT"
 
@@ -1221,7 +1292,12 @@ function buildClientReport(clientData, csvRecords, randomFn) {
     lines.push(motivationalMessage);
   }
 
-  return { text: lines.join("\n"), cajaWarning };
+  if (compatibilityWarning) {
+    lines.push("");
+    lines.push(compatibilityWarning);
+  }
+
+  return { text: lines.join("\n"), cajaWarning, compatibilityWarning };
 }
 
 // Parsea y valida la estructura del CSV, SIN aplicar todavía el fusible de MAX_ONUS
@@ -1469,6 +1545,40 @@ const TAP_EASTER_EGG_DISPLAY_MS = 10000;
 // con notification.enabled generan una novedad pendiente.
 const CHANGELOG_ENTRIES = [
   {
+    version: "3.0.11",
+    changes: [
+      {
+        title: "🔌 Compatibilidad ONU / OLT",
+        text: "Ahora la extensión detecta cuando el fabricante de la ONU no es compatible con la OLT y muestra una advertencia.",
+      },
+      {
+        title: "⚠️ Aviso en ONUs pendientes de habilitación",
+        text: "Las ONUs que aparecen en /onu/unconfigured ahora muestran una advertencia cuando su serial no es compatible con la OLT correspondiente.",
+      },
+      {
+        title: "🔄 Detección de ONUs cargadas dinámicamente",
+        text: "La detección de incompatibilidades funciona también cuando SmartOLT carga o reemplaza dinámicamente las ONUs después de presionar \"Actualizar\".",
+      },
+      {
+        title: "📋 Compatibilidad en la consulta de clientes",
+        text: "La advertencia de incompatibilidad también se incluye en la consulta y en el texto generado para enviar por Telegram.",
+      },
+      {
+        title: "⚠️ Aviso visual de compatibilidad",
+        text: "Ahora, cuando una ONU no es compatible con la OLT, la ficha del cliente muestra una marca breve \"⚠️ No compatible\" junto al serial, con información adicional al pasar el mouse.",
+      },
+    ],
+  },
+  {
+    version: "3.0.10",
+    changes: [
+      {
+        title: "🛠️ Corrección al actualizar los datos",
+        text: "Ahora la falta de una caja seleccionada en SmartOLT se trata como un aviso y no bloquea la consulta ni la generación del reporte.",
+      },
+    ],
+  },
+  {
     version: "3.0.9",
     changes: [
       {
@@ -1549,6 +1659,13 @@ const SmartOLTShared = {
   isClientPageUrl,
   isOnuConfiguredPageUrl,
   OPTICAL_TOLERANCE_DB,
+  OLT_COMPATIBILITY_GROUPS,
+  ONU_COMPATIBILITY_PREFIXES,
+  ONU_OLT_COMPATIBILITY_WARNING,
+  SMARTOLT_OLT_ID_MAP,
+  SMARTOLT_OLT_DISPLAY_NAME_MAP,
+  resolveSmartoltOltIdentifier,
+  getOnuOltCompatibilityWarning,
   parseCSV,
   analyzeCSV,
   parseRecordsFromCSV,

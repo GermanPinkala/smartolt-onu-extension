@@ -94,6 +94,7 @@ const changelogContent = document.getElementById("changelogContent");
 const backFromChangelogBtn = document.getElementById("backFromChangelogBtn");
 const copyFeedback = document.getElementById("copyFeedback");
 const clienteFeedback = document.getElementById("clienteFeedback");
+const compatibilityWarning = document.getElementById("compatibilityWarning");
 const csvFeedback = document.getElementById("csvFeedback");
 
 const manualLoadingMsg = document.getElementById("manualLoadingMsg");
@@ -213,6 +214,7 @@ function renderNoCsv() {
 
   copyFeedback.hidden = true;
   clienteFeedback.hidden = true;
+  compatibilityWarning.hidden = true;
   csvFeedback.hidden = true;
 
   capturedBox.hidden = false;
@@ -340,6 +342,7 @@ function renderCaptured(data, options = {}) {
 
   copyFeedback.hidden = true;
   clienteFeedback.hidden = true;
+  compatibilityWarning.hidden = true;
   csvFeedback.hidden = true;
 
   capturedBox.hidden = false;
@@ -1486,6 +1489,10 @@ function injectedExtractClientData() {
   // campo "Puerto" por separado.
   const caja = findNapDivisorValue();
   const serial = findValueByLabels(["SN", "Serial", "Serial Number", "S/N"]);
+  // SmartOLT muestra el nombre operativo de la OLT (p. ej. "5 - OLT-D")
+  // separado de la Zona (p. ej. "OBE-OLT-D"). La Zona es el identificador
+  // estable utilizado por la tabla de compatibilidad.
+  const oltName = findValueByLabels(["Zona", "Zone"]);
 
   return waitForSignalWrapper(10, 200).then((signal) => {
     let sig1490 = null;
@@ -1509,6 +1516,7 @@ function injectedExtractClientData() {
       // partir de "caja" (que puede traer "D1FA1 (Port 6)") — nunca acá.
       puerto: null,
       serial: serial || null,
+      oltName: oltName || null,
       sig1490,
       sig1310,
     };
@@ -1517,6 +1525,7 @@ function injectedExtractClientData() {
 
 async function handleObtenerCliente() {
   clearGeneratedTextPreview();
+  compatibilityWarning.hidden = true;
   clienteFeedback.textContent = "Buscando datos del cliente…";
   clienteFeedback.hidden = false;
 
@@ -1573,13 +1582,17 @@ async function handleObtenerCliente() {
   if (freshness.message) setUpdateStatusText(freshness.message, "stale");
 
   // El promedio de caja sale del MISMO CSV ya capturado (sin volver a
-  // consultar SmartOLT). buildClientReport devuelve { text, cajaWarning }:
+  // consultar SmartOLT). buildClientReport devuelve { text, cajaWarning,
+  // compatibilityWarning }:
   // "text" es EXACTAMENTE lo que se copia (nunca incluye avisos de caja ni
   // listados de LOS/Power fail/otras cajas); "cajaWarning" es un aviso SOLO
   // para esta interfaz (p. ej. "la caja no coincide con el CSV") — nunca se
   // agrega al texto copiado, tal como pidió el usuario.
   const records = getCurrentRecords();
   const result = SmartOLTShared.buildClientReport(clientData, records);
+
+  compatibilityWarning.textContent = result.compatibilityWarning || "";
+  compatibilityWarning.hidden = !result.compatibilityWarning;
 
   showGeneratedText(result.text);
   const copied = await copyTextToClipboard(result.text);

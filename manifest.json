@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SmartOLT — Control de ONUs",
-  "version": "3.0.11",
+  "version": "3.0.12",
   "description": "Captura el CSV de SmartOLT, muestra ONUs y cajas y prepara el texto para Telegram. Permite descargar o cargar el CSV manualmente.",
   "action": {
     "default_popup": "popup.html",

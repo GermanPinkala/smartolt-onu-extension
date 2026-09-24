@@ -15,8 +15,10 @@
  *
  * Además se conservan dos funciones manuales, como respaldo secundario (no
  * protagonistas de la interfaz, colapsadas bajo "Opciones manuales"):
- *   - "Procesar otro CSV": elegir a mano un CSV histórico ya exportado antes.
- *     Es una vista puntual — no reemplaza el último CSV capturado automáticamente.
+ *   - "Procesar otro CSV": elegir a mano un CSV ya exportado antes. Si es
+ *     válido pasa a ser el estado "oficial" (reemplaza los datos anteriores
+ *     y descarta el error de la última captura), así una carga manual válida
+ *     siempre permite recuperarse de una captura fallida.
  *   - "Detectar último CSV descargado": mecanismo de recuperación si alguna
  *     vez la captura automática en segundo plano falla. Si encuentra un CSV
  *     válido, sí pasa a ser el estado "oficial" (se guarda en
@@ -48,12 +50,17 @@ if (activeTheme !== "normal") {
 const STORAGE_KEY = "smartoltState";
 const PENDING_EXPORTS_KEY = "smartoltPendingExports";
 const UPDATE_STATUS_KEY = "smartoltUpdateStatus";
+const LAST_CAPTURE_ERROR_KEY = "smartoltLastCaptureError";
 const GENERATED_PREVIEW_STATE_KEY = "generatedTextExpanded";
 const NOTIFICATION_STATE_KEY = "smartoltNotificationState";
 const NOTIFICATION_TEST_RESET_KEY = "smartoltNotificationTestReset:update-csv-3.0.9";
 const NOTIFICATION_MAX_AGE_MS = 2 * 24 * 60 * 60 * 1000;
 const OPERATIONAL_NOTICE_DURATION_MS = 15000;
 const REQUEST_TTL_MS = 120000;
+// Una operación "en curso" más vieja que esto se considera vencida: la
+// solicitud pendiente ya no puede reclamarse y el botón vuelve a habilitarse.
+const UPDATE_STATUS_TIMEOUT_MS = REQUEST_TTL_MS;
+const IN_PROGRESS_UPDATE_STATES = ["requesting", "generating", "processing"];
 const MAX_AUTO_DETECT_CANDIDATES = 8;
 
 // ---------- Referencias a elementos del DOM ----------
@@ -68,7 +75,11 @@ const subtitle = document.getElementById("subtitle");
 const capturedBox = document.getElementById("capturedBox");
 const overLimitBox = document.getElementById("overLimitBox");
 const overLimitText = document.getElementById("overLimitText");
+const overLimitHint = document.getElementById("overLimitHint");
+const overLimitCloseBtn = document.getElementById("overLimitCloseBtn");
 const captureFailedBox = document.getElementById("captureFailedBox");
+const captureFailedHint = document.getElementById("captureFailedHint");
+const captureFailedCloseBtn = document.getElementById("captureFailedCloseBtn");
 
 const csvCapturedBadge = document.getElementById("csvCapturedBadge");
 const compactStats = document.getElementById("compactStats");
@@ -127,6 +138,10 @@ let currentFileName = null;
 // fecha con Date.now()).
 let currentCapturedAt = null;
 let currentDataIdentity = null;
+// Error de la última captura (smartoltLastCaptureError): se muestra como aviso
+// sobre la pantalla normal, sin reemplazar los datos ni ocultar los controles.
+let currentCaptureError = null;
+let updateStatusExpiryTimer = null;
 
 let notificationState = {};
 let pendingVersionNotifications = [];
@@ -142,9 +157,9 @@ let operationalNoticeTimer = null;
 // la fecha/hora REAL del último CSV capturado — el MISMO timestamp que ya usa
 // "📅 Datos del:" en ESTADO DE CAJA(S) (currentCapturedAt, ver más abajo),
 // nunca la hora de apertura del popup ni la de una consulta, y nunca una
-// segunda fuente de tiempo nueva. Si no hay ningún CSV capturado (sin CSV
-// todavía, over_limit, capture_failed — currentCapturedAt queda en null en
-// esos casos, ver renderNoCsv/renderOverLimit/renderCaptureFailed), se
+// segunda fuente de tiempo nueva. Un error de la última captura no la cambia:
+// sigue la fecha de los últimos datos válidos. Si no hay ningún CSV válido
+// (currentCapturedAt queda en null, ver renderNoCsv), se
 // mantiene el texto genérico anterior tal cual.
 function updateSubtitle(screenName) {
   if (screenName === "error") {
@@ -166,12 +181,6 @@ function showScreen(name) {
   updateSubtitle(name);
 }
 
-function hideAllHomeBoxes() {
-  capturedBox.hidden = true;
-  overLimitBox.hidden = true;
-  captureFailedBox.hidden = true;
-}
-
 // Estado: todavía no hay ningún CSV capturado (v3.0.8). A diferencia de
 // versiones anteriores, esto YA NO bloquea la pantalla con un mensaje de
 // "esperá a exportar un CSV": se muestra el mismo bloque de botones que el
@@ -186,8 +195,6 @@ function hideAllHomeBoxes() {
 //     según refreshClienteBtnState(), que depende únicamente de si la pestaña
 //     activa es una ficha de cliente de SmartOLT — nunca de si hay CSV.
 function renderNoCsv() {
-  hideAllHomeBoxes();
-
   csvCapturedBadge.hidden = true;
   compactStats.hidden = true;
   losPowerFailChip.hidden = true;
@@ -221,24 +228,35 @@ function renderNoCsv() {
   showScreen("home");
 }
 
-function renderOverLimit(count, fileName) {
-  hideAllHomeBoxes();
-  overLimitText.textContent = SmartOLTShared.formatOverLimitMessage(count, fileName);
-  overLimitBox.hidden = false;
-  // Este CSV superó el límite y no quedó como "capturado" -> mismo motivo que
-  // renderNoCsv: el subtítulo no debe mostrar una fecha de una captura
-  // anterior que ya no es la vigente.
-  currentCapturedAt = null;
-  showScreen("home");
+// Aviso del error de la última captura (over_limit / capture_failed). Nunca
+// toca los datos válidos, la fecha del subtítulo ni los controles: el usuario
+// puede seguir usando los datos anteriores o reintentar.
+function renderCaptureError(error) {
+  overLimitBox.hidden = true;
+  captureFailedBox.hidden = true;
+  if (!error) return;
+
+  const hint = currentCsvText
+    ? "Se siguen mostrando los últimos datos válidos. Podés reintentar con 🔄 Actualizar datos o cargar otro CSV."
+    : "Podés reintentar con 🔄 Actualizar datos o cargar un CSV desde las opciones manuales.";
+  if (error.status === "over_limit") {
+    overLimitText.textContent = SmartOLTShared.formatOverLimitMessage(error.count, error.fileName);
+    overLimitHint.textContent = hint;
+    overLimitBox.hidden = false;
+  } else {
+    captureFailedHint.textContent = hint;
+    captureFailedBox.hidden = false;
+  }
 }
 
-function renderCaptureFailed() {
-  hideAllHomeBoxes();
-  captureFailedBox.hidden = false;
-  // Falló el procesamiento del CSV -> no quedó ningún CSV "capturado" vigente,
-  // mismo motivo que renderNoCsv/renderOverLimit.
-  currentCapturedAt = null;
-  showScreen("home");
+async function dismissCaptureError() {
+  currentCaptureError = null;
+  renderCaptureError(null);
+  try {
+    await chrome.storage.session.remove(LAST_CAPTURE_ERROR_KEY);
+  } catch (e) {
+    // El aviso queda cerrado en esta ventana aunque no se pueda borrar.
+  }
 }
 
 // "A47B1 · B46A4 · C35A2 · D47F1" + " ...+1" si hay más de 4. Las cajas ya
@@ -259,7 +277,8 @@ function renderCajaNamesWithContext(contextCajas) {
     return;
   }
 
-  const names = [...new Set([...currentCajas, ...loadedCajas])];
+  const presentCajas = currentCajas.filter((name) => loadedCajas.includes(name));
+  const names = [...new Set([...presentCajas, ...loadedCajas])];
   const shownNames = names.slice(0, 4);
   cajaNamesEl.replaceChildren();
   shownNames.forEach((name, index) => {
@@ -303,8 +322,6 @@ function formatEstadoCajasLabel(cajaCount) {
 // data: { total, onlineCount, cajaCount, cajaNames, losCount, powerFailCount,
 //         telegramText, csvText, fileName }
 function renderCaptured(data, options = {}) {
-  hideAllHomeBoxes();
-
   // La captura queda disponible internamente; su confirmación visual vive en
   // la bandeja de avisos y no como un cartel permanente del home.
   csvCapturedBadge.hidden = true;
@@ -351,28 +368,23 @@ function renderCaptured(data, options = {}) {
 }
 
 function applyStoredState(state, options = {}) {
-  if (!state || !state.status) {
+  if (state && state.status === "captured") {
+    renderCaptured(state, options);
+  } else {
+    // Sin datos válidos. Un "over_limit"/"capture_failed" guardado en
+    // smartoltState por una versión anterior se trata como aviso de error.
     renderNoCsv();
-    return;
+    if (state && (state.status === "over_limit" || state.status === "capture_failed") && !currentCaptureError) {
+      currentCaptureError = state;
+    }
   }
-  switch (state.status) {
-    case "captured":
-      renderCaptured(state, options);
-      break;
-    case "over_limit":
-      renderOverLimit(state.count, state.fileName);
-      break;
-    case "capture_failed":
-      renderCaptureFailed();
-      break;
-    default:
-      renderNoCsv();
-  }
+  renderCaptureError(currentCaptureError);
 }
 
 async function loadStateFromStorage() {
   try {
-    const stored = await chrome.storage.session.get(STORAGE_KEY);
+    const stored = await chrome.storage.session.get([STORAGE_KEY, LAST_CAPTURE_ERROR_KEY]);
+    currentCaptureError = (stored && stored[LAST_CAPTURE_ERROR_KEY]) || null;
     applyStoredState(stored && stored[STORAGE_KEY]);
   } catch (e) {
     // Si por lo que sea no se puede leer storage.session, no se inventa nada:
@@ -381,20 +393,55 @@ async function loadStateFromStorage() {
   }
 }
 
+const UPDATE_STATUS_LABELS = {
+  requesting: "🔄 Solicitando actualización...",
+  generating: "⏳ Generando datos...",
+  processing: "⏳ Procesando datos...",
+  completed: "",
+  failed: "⚠️ No se pudo completar la actualización",
+};
+
+function isUpdateStatusExpired(value) {
+  return (
+    !!value &&
+    IN_PROGRESS_UPDATE_STATES.includes(value.status) &&
+    !(Number.isFinite(value.updatedAt) && Date.now() - value.updatedAt < UPDATE_STATUS_TIMEOUT_MS)
+  );
+}
+
+function isUpdateStatusActive(value) {
+  return !!value && IN_PROGRESS_UPDATE_STATES.includes(value.status) && !isUpdateStatusExpired(value);
+}
+
+// Refleja smartoltUpdateStatus en la interfaz. Una operación en curso vencida
+// (el service worker se detuvo, la descarga nunca llegó, etc.) se muestra como
+// fallida y deja "Actualizar datos" disponible otra vez, sin recargar nada.
+function applyUpdateStatus(value) {
+  if (updateStatusExpiryTimer) {
+    clearTimeout(updateStatusExpiryTimer);
+    updateStatusExpiryTimer = null;
+  }
+  if (!value) return;
+
+  if (isUpdateStatusExpired(value)) {
+    setUpdateStatusText("⚠️ La actualización anterior no terminó. Podés intentarlo nuevamente.", "failed");
+  } else {
+    setUpdateStatusText(UPDATE_STATUS_LABELS[value.status] || "", value.status);
+  }
+
+  if (isUpdateStatusActive(value)) {
+    updateDataBtn.disabled = true;
+    const remaining = UPDATE_STATUS_TIMEOUT_MS - (Date.now() - value.updatedAt);
+    updateStatusExpiryTimer = setTimeout(() => applyUpdateStatus(value), remaining + 50);
+  } else {
+    refreshUpdateBtnState();
+  }
+}
+
 async function loadUpdateStatus() {
   try {
     const stored = await chrome.storage.session.get(UPDATE_STATUS_KEY);
-    const value = stored && stored[UPDATE_STATUS_KEY];
-    if (!value) return;
-    const labels = {
-      requesting: "🔄 Solicitando actualización...",
-      generating: "⏳ Generando datos...",
-      processing: "⏳ Procesando datos...",
-      completed: "",
-      failed: "⚠️ No se pudo completar la actualización",
-    };
-    setUpdateStatusText(labels[value.status] || "", value.status);
-    updateDataBtn.disabled = ["requesting", "generating", "processing"].includes(value.status);
+    applyUpdateStatus(stored && stored[UPDATE_STATUS_KEY]);
   } catch (e) {
     // La pantalla principal sigue funcionando aunque no exista estado de proceso.
   }
@@ -854,6 +901,13 @@ async function runUpdateFlow() {
     setUpdateStatusText("⏳ Generando datos...", "generating");
   } catch (e) {
     await removePendingRequest(request.requestId);
+    try {
+      await chrome.storage.session.set({
+        [UPDATE_STATUS_KEY]: { status: "failed", requestId: request.requestId, updatedAt: Date.now() },
+      });
+    } catch (e2) {
+      // Si no se puede escribir, el estado "requesting" vence solo.
+    }
     updateDataBtn.disabled = false;
     setUpdateStatusText("⚠️ No se pudo iniciar la actualización", "error");
   }
@@ -873,16 +927,15 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "session" || !changes[UPDATE_STATUS_KEY]) return;
   const value = changes[UPDATE_STATUS_KEY].newValue;
   if (!value) return;
-  const labels = {
-    requesting: "🔄 Solicitando actualización...",
-    generating: "⏳ Generando datos...",
-    processing: "⏳ Procesando datos...",
-    completed: "",
-    failed: "⚠️ No se pudo completar la actualización",
-  };
-  setUpdateStatusText(labels[value.status] || "", value.status);
-  updateDataBtn.disabled = value.status === "requesting" || value.status === "generating" || value.status === "processing";
+  applyUpdateStatus(value);
   if (value.status === "completed") refreshCurrentDataContext();
+});
+
+// El error de la última captura se muestra/quita en vivo, sin tocar los datos.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "session" || !changes[LAST_CAPTURE_ERROR_KEY]) return;
+  currentCaptureError = changes[LAST_CAPTURE_ERROR_KEY].newValue || null;
+  renderCaptureError(currentCaptureError);
 });
 
 // =========================================================================
@@ -940,7 +993,9 @@ function errorMessageForCode(result, fileName) {
 }
 
 // =========================================================================
-// "Procesar otro CSV" — carga manual puntual, no reemplaza el CSV oficial
+// "Procesar otro CSV" — si el CSV es válido pasa a ser el estado oficial
+// (reemplaza los datos anteriores y descarta el error de la última captura).
+// Un CSV inválido solo muestra el error: los datos oficiales quedan intactos.
 // =========================================================================
 
 function handleFile(file) {
@@ -950,9 +1005,10 @@ function handleFile(file) {
   manualLoadingMsg.hidden = false;
 
   const reader = new FileReader();
-  reader.onload = (e) => {
+  reader.onload = async (e) => {
     manualLoadingMsg.hidden = true;
     const text = String(e.target.result);
+    let officialState;
     try {
       const result = SmartOLTShared.analyzeCSV(text);
       if (!result.ok) {
@@ -960,12 +1016,11 @@ function handleFile(file) {
         showError(message, details);
         return;
       }
-      // Vista puntual: se muestra pero NO se guarda como estado oficial en
-      // chrome.storage.session (ese lugar es del CSV capturado automáticamente).
       // capturedAt usa file.lastModified (la fecha real del ARCHIVO elegido),
       // nunca Date.now() — este flujo puede procesar un CSV descargado hace
       // rato, no en este instante.
-      renderCaptured({
+      officialState = {
+        status: "captured",
         total: result.total,
         onlineCount: result.onlineCount,
         cajaCount: result.cajaCount,
@@ -976,11 +1031,23 @@ function handleFile(file) {
         csvText: text,
         fileName: file.name,
         capturedAt: file.lastModified || null,
-      }, { notify: true });
+      };
     } catch (err) {
       showError("⚠️ No se pudo identificar la estructura del archivo de SmartOLT.", [
         "Ocurrió un error inesperado al leer el archivo.",
       ]);
+      return;
+    }
+
+    const saved = await saveOfficialState(officialState);
+    if (saved) {
+      currentCaptureError = null;
+    }
+    renderCaptured(officialState, { notify: true });
+    renderCaptureError(currentCaptureError);
+    if (!saved) {
+      hintMsg.textContent = "⚠️ El CSV se muestra, pero no se pudo guardar: al cerrar la ventana volverán los datos anteriores.";
+      hintMsg.hidden = false;
     }
   };
   reader.onerror = () => {
@@ -1010,12 +1077,21 @@ function pathToFileURL(rawPath) {
   return "file://" + encoded;
 }
 
+// Guarda un CSV VÁLIDO como estado oficial y descarta el error de la última
+// captura. Devuelve false si storage.session no lo aceptó.
 async function saveOfficialState(state) {
   try {
     await chrome.storage.session.set({ [STORAGE_KEY]: state });
   } catch (e) {
     // best-effort, igual que en background.js
+    return false;
   }
+  try {
+    await chrome.storage.session.remove(LAST_CAPTURE_ERROR_KEY);
+  } catch (e) {
+    // Los datos ya quedaron guardados; el aviso viejo puede cerrarse a mano.
+  }
+  return true;
 }
 
 async function runAutoDetectFlow() {
@@ -1060,7 +1136,12 @@ async function runAutoDetectFlow() {
       continue;
     }
 
-    const result = SmartOLTShared.analyzeCSV(text);
+    let result;
+    try {
+      result = SmartOLTShared.analyzeCSV(text);
+    } catch (e) {
+      continue; // un CSV que rompe el análisis se descarta como cualquier otro inválido
+    }
     if (result.ok) {
       const fileName = item.filename.split(/[\\/]/).pop();
       // capturedAt usa item.startTime (cuándo se descargó REALMENTE ese CSV
@@ -1080,8 +1161,9 @@ async function runAutoDetectFlow() {
         telegramText: result.telegramText,
         capturedAt: itemStartTime,
       };
-      await saveOfficialState(officialState);
+      if (await saveOfficialState(officialState)) currentCaptureError = null;
       renderCaptured(officialState, { notify: true });
+      renderCaptureError(currentCaptureError);
       found = true;
       break;
     }
@@ -1124,6 +1206,8 @@ backToHomeBtn.addEventListener("click", () => {
   loadStateFromStorage();
 });
 
+overLimitCloseBtn.addEventListener("click", dismissCaptureError);
+captureFailedCloseBtn.addEventListener("click", dismissCaptureError);
 notificationDetailBtn.addEventListener("click", toggleNotificationDetail);
 notificationCloseBtn.addEventListener("click", dismissOperationalNotice);
 notificationAcknowledgeBtn.addEventListener("click", acknowledgeCurrentNotification);
@@ -1310,7 +1394,14 @@ consultarCajasBtn.addEventListener("click", async () => {
   // La fecha/hora es la del ARCHIVO CSV procesado (currentCapturedAt), nunca
   // la hora actual de este click — se antepone una sola vez, no dentro de
   // cada caja (ver prependCsvTimestamp en shared.js).
-  const reportText = SmartOLTShared.prependCsvTimestamp(SmartOLTShared.buildTelegramText(records), currentCapturedAt);
+  let reportText;
+  try {
+    reportText = SmartOLTShared.prependCsvTimestamp(SmartOLTShared.buildTelegramText(records), currentCapturedAt);
+  } catch (e) {
+    copyFeedback.textContent = "⚠️ No se pudo generar el informe. Podés intentarlo nuevamente.";
+    copyFeedback.hidden = false;
+    return;
+  }
   showGeneratedText(reportText);
   const copied = await copyTextToClipboard(reportText);
   copyFeedback.textContent = copied ? "✓ Copiado" : "⚠️ No se pudo copiar automáticamente";
@@ -1588,8 +1679,13 @@ async function handleObtenerCliente() {
   // listados de LOS/Power fail/otras cajas); "cajaWarning" es un aviso SOLO
   // para esta interfaz (p. ej. "la caja no coincide con el CSV") — nunca se
   // agrega al texto copiado, tal como pidió el usuario.
-  const records = getCurrentRecords();
-  const result = SmartOLTShared.buildClientReport(clientData, records);
+  let result;
+  try {
+    result = SmartOLTShared.buildClientReport(clientData, getCurrentRecords());
+  } catch (e) {
+    clienteFeedback.textContent = "⚠️ No se pudo generar el informe del cliente. Podés intentarlo nuevamente.";
+    return;
+  }
 
   compatibilityWarning.textContent = result.compatibilityWarning || "";
   compatibilityWarning.hidden = !result.compatibilityWarning;
@@ -1678,9 +1774,7 @@ async function refreshUpdateBtnState() {
   let activeRequest = false;
   try {
     const stored = await chrome.storage.session.get(UPDATE_STATUS_KEY);
-    activeRequest = ["requesting", "generating", "processing"].includes(
-      stored && stored[UPDATE_STATUS_KEY] && stored[UPDATE_STATUS_KEY].status
-    );
+    activeRequest = isUpdateStatusActive(stored && stored[UPDATE_STATUS_KEY]);
   } catch (e) {
     activeRequest = false;
   }

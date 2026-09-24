@@ -1545,6 +1545,39 @@ const TAP_EASTER_EGG_DISPLAY_MS = 10000;
 // con notification.enabled generan una novedad pendiente.
 const CHANGELOG_ENTRIES = [
   {
+    version: "3.0.12",
+    changes: [
+      {
+        title: "🛡️ Los datos válidos ya no se pierden ante un error",
+        text: "Si una captura falla o el CSV es inválido, se siguen mostrando los últimos datos válidos junto con un aviso que se puede cerrar.",
+      },
+      {
+        title: "📏 Recuperación tras un CSV que supera el límite",
+        text: "Un CSV que supera el límite de ONUs ya no reemplaza los datos anteriores: se muestra el aviso y podés volver a actualizar o cargar otro CSV.",
+      },
+      {
+        title: "🔄 Actualizaciones que ya no quedan bloqueadas",
+        text: "Si una actualización no termina en 2 minutos, se marca como no completada y el botón 🔄 Actualizar datos vuelve a estar disponible.",
+      },
+      {
+        title: "📂 \"Procesar otro CSV\" permite recuperarse",
+        text: "Un CSV válido cargado manualmente pasa a ser el dato vigente y descarta el aviso de error de la captura anterior.",
+      },
+      {
+        title: "🧯 Errores al generar informes",
+        text: "Si no se puede generar el informe de cajas o del cliente, se muestra un aviso y podés intentarlo nuevamente sin reabrir la extensión.",
+      },
+      {
+        title: "📍 Indicador de cajas",
+        text: "El indicador de cajas muestra únicamente las cajas presentes en el CSV. Si la caja de la página no está incluida, solo se informa con el aviso de datos desactualizados.",
+      },
+      {
+        title: "🔌 Compatibilidad en ONUs pendientes de habilitación",
+        text: "En /onu/unconfigured, la compatibilidad ONU / OLT se determina por la OLT de cada ONU, sin depender del filtro seleccionado en la página.",
+      },
+    ],
+  },
+  {
     version: "3.0.11",
     changes: [
       {

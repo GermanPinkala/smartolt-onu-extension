@@ -35,6 +35,9 @@ importScripts("shared.js");
 const STORAGE_KEY = "smartoltState";
 const PENDING_EXPORTS_KEY = "smartoltPendingExports";
 const UPDATE_STATUS_KEY = "smartoltUpdateStatus";
+// Error de la última captura, separado de los datos válidos: un fallo nunca
+// reemplaza ni borra smartoltState. Se elimina con la próxima carga válida.
+const LAST_CAPTURE_ERROR_KEY = "smartoltLastCaptureError";
 
 // Acepta cualquier subdominio de smartolt.com (ej. obercom.smartolt.com), no
 // un dominio hardcodeado, para no atarse a un solo reseller.
@@ -75,12 +78,31 @@ function defaultFileName() {
   )}${pad(d.getMinutes())}.csv`;
 }
 
+// Guarda un resultado VÁLIDO y, en la misma escritura, descarta el error de la
+// captura anterior. Devuelve false si storage.session no lo aceptó.
 async function saveState(state) {
   try {
     await chrome.storage.session.set({ [STORAGE_KEY]: state });
   } catch (e) {
     // best-effort: si por lo que sea storage.session no está disponible, no
     // hay más red de contención posible acá (no usamos storage.local a propósito).
+    return false;
+  }
+  try {
+    await chrome.storage.session.remove(LAST_CAPTURE_ERROR_KEY);
+  } catch (e) {
+    // Los datos ya quedaron guardados; el aviso viejo puede cerrarse a mano.
+  }
+  return true;
+}
+
+async function saveCaptureError(error) {
+  try {
+    await chrome.storage.session.set({
+      [LAST_CAPTURE_ERROR_KEY]: { ...error, failedAt: Date.now() },
+    });
+  } catch (e) {
+    // Los datos válidos anteriores siguen intactos aunque no se registre el error.
   }
 }
 
@@ -171,25 +193,32 @@ function claimPendingExport(item) {
 
 // Descarga y procesa el CSV que SmartOLT ya generó (job creado y autenticado
 // por la propia SmartOLT, no por nosotros). Es el único fetch que hacemos.
+// Toda captura termina en "completed" o "failed", incluso ante una excepción
+// inesperada, para que el popup nunca quede esperando una operación trabada.
 async function captureExport(downloadUrl, request) {
+  let completed = false;
+  try {
+    completed = await captureExportData(downloadUrl, request);
+  } catch (e) {
+    await saveCaptureError({ status: "capture_failed", reason: "exception" });
+  }
+  await saveUpdateStatus(completed ? "completed" : "failed", request, completed ? { capturedAt: completed } : {});
+}
+
+// Devuelve el capturedAt del resultado válido guardado, o false si falló.
+async function captureExportData(downloadUrl, request) {
   await saveUpdateStatus("processing", request);
   let resp;
   try {
     resp = await fetch(downloadUrl, { credentials: "include" });
   } catch (e) {
-    await saveState({ status: "capture_failed", reason: "network", capturedAt: Date.now() });
-    await saveUpdateStatus("failed", request);
-    return;
+    await saveCaptureError({ status: "capture_failed", reason: "network" });
+    return false;
   }
 
   if (!resp.ok) {
-    await saveState({
-      status: "capture_failed",
-      reason: `http_${resp.status}`,
-      capturedAt: Date.now(),
-    });
-    await saveUpdateStatus("failed", request);
-    return;
+    await saveCaptureError({ status: "capture_failed", reason: `http_${resp.status}` });
+    return false;
   }
 
   const csvText = await resp.text();
@@ -203,26 +232,21 @@ async function captureExport(downloadUrl, request) {
     // Se guarda también el nombre de archivo: trae codificado el OLT/Board/Port
     // del PON (ver SmartOLTShared.parsePonFromFileName), así el popup puede
     // mostrar de qué PON se trata en el mensaje de "supera el límite".
-    await saveState({ status: "over_limit", count: result.count, fileName, capturedAt: Date.now() });
-    await saveUpdateStatus("failed", request);
-    return;
+    // El CSV no se guarda y los datos válidos anteriores quedan intactos.
+    await saveCaptureError({ status: "over_limit", reason: "OVER_LIMIT", count: result.count, fileName });
+    return false;
   }
 
   if (!result.ok) {
-    await saveState({
-      status: "capture_failed",
-      reason: result.code || "parse_error",
-      capturedAt: Date.now(),
-    });
-    await saveUpdateStatus("failed", request);
-    return;
+    await saveCaptureError({ status: "capture_failed", reason: result.code || "parse_error", fileName });
+    return false;
   }
 
   // Se guarda el CSV crudo (byte a byte tal cual lo devolvió SmartOLT) para que
   // "Descargar último CSV" entregue exactamente ese contenido, sin volver a
-  // serializarlo. Reemplaza siempre lo anterior — nunca se acumula.
+  // serializarlo. Solo un resultado válido reemplaza lo anterior.
   const capturedAt = Date.now();
-  await saveState({
+  const saved = await saveState({
     status: "captured",
     csvText,
     fileName,
@@ -241,7 +265,11 @@ async function captureExport(downloadUrl, request) {
     }),
     requestedCajaNames: request.cajaNames || [],
   });
-  await saveUpdateStatus("completed", request, { capturedAt });
+  if (!saved) {
+    await saveCaptureError({ status: "capture_failed", reason: "storage", fileName });
+    return false;
+  }
+  return capturedAt;
 }
 
 chrome.downloads.onCreated.addListener((item) => {
@@ -268,5 +296,8 @@ chrome.downloads.onCreated.addListener((item) => {
     }
 
     await captureExport(item.url, request);
+  }).catch(() => {
+    // Sin rechazos sin manejar: si algo falla antes de capturar, el popup
+    // considera vencida la operación en curso (ver UPDATE_STATUS_TIMEOUT_MS).
   });
 });

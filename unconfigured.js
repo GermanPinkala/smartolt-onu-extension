@@ -4,17 +4,35 @@ const UNCONFIGURED_ROOT_ID = "existingUnconfiguredOnus";
 const WARNING_ATTRIBUTE = "data-smartolt-onu-compatibility-warning";
 let scanScheduled = false;
 
-function getOltNamesById() {
-  const result = {};
-  const select = document.getElementById("olt");
-  if (!select) return result;
+const HUAWEI_ONU_PREFIX = SmartOLTShared.ONU_COMPATIBILITY_PREFIXES.huawei;
+const ZTE_ONU_PREFIX = SmartOLTShared.ONU_COMPATIBILITY_PREFIXES.zte;
 
-  Array.from(select.options).forEach((option) => {
-    const id = option.value.trim();
-    const internalName = SmartOLTShared.resolveSmartoltOltIdentifier(id, option.textContent);
-    if (internalName) result[id] = internalName;
-  });
-  return result;
+// Tabla oficial de /onu/unconfigured: ID de OLT (parámetro olt del enlace
+// "Autorizar") -> prefijo de serial esperado. Los IDs ausentes no se evalúan.
+const UNCONFIGURED_OLT_COMPATIBILITY = {
+  "2": HUAWEI_ONU_PREFIX, // OLT-E
+  "3": HUAWEI_ONU_PREFIX, // OLT-C
+  "4": HUAWEI_ONU_PREFIX, // OLT-A
+  "5": HUAWEI_ONU_PREFIX, // OLT-D
+  "6": HUAWEI_ONU_PREFIX, // OLT-B
+  "7": HUAWEI_ONU_PREFIX, // OLT-A-PZA
+  "8": HUAWEI_ONU_PREFIX, // OLT-A-WND
+  "10": HUAWEI_ONU_PREFIX, // OLT-F-VBN
+  "11": HUAWEI_ONU_PREFIX, // OLT-G-MRT
+  "12": HUAWEI_ONU_PREFIX, // OLT-C-PAZ
+  "13": HUAWEI_ONU_PREFIX, // OLT-D-ADH
+  "15": ZTE_ONU_PREFIX, // OLT-A-ITU
+  "16": ZTE_ONU_PREFIX, // OLT-A-ELD
+};
+
+function getUnconfiguredCompatibilityWarning(oltId, serial) {
+  const expectedPrefix = UNCONFIGURED_OLT_COMPATIBILITY[String(oltId || "").trim()];
+  const normalizedSerial = String(serial || "").trim().toUpperCase();
+  if (!expectedPrefix || !normalizedSerial) return null;
+
+  return normalizedSerial.startsWith(expectedPrefix)
+    ? null
+    : SmartOLTShared.ONU_OLT_COMPATIBILITY_WARNING;
 }
 
 function getAuthorizationData(link) {
@@ -35,13 +53,12 @@ function getWarningElement(actionCell) {
   return actionCell.querySelector(`[${WARNING_ATTRIBUTE}]`);
 }
 
-function updateWarning(row, actionLink, oltNamesById) {
+function updateWarning(row, actionLink) {
   const actionCell = actionLink.closest("td") || actionLink.parentElement || row;
   const existingWarning = getWarningElement(actionCell);
   const authorizationData = getAuthorizationData(actionLink);
-  const internalOltName = authorizationData && oltNamesById[authorizationData.oltId];
   const warning = authorizationData
-    ? SmartOLTShared.getOnuOltCompatibilityWarning(internalOltName, authorizationData.serial)
+    ? getUnconfiguredCompatibilityWarning(authorizationData.oltId, authorizationData.serial)
     : null;
 
   if (!warning) {
@@ -61,11 +78,10 @@ function scanUnconfiguredOnus() {
   const root = document.getElementById(UNCONFIGURED_ROOT_ID);
   if (!root) return;
 
-  const oltNamesById = getOltNamesById();
   const links = root.querySelectorAll("a.activateButton");
   links.forEach((link) => {
     const row = link.closest("tr.valign-center") || link.closest("tr") || link.parentElement;
-    if (row) updateWarning(row, link, oltNamesById);
+    if (row) updateWarning(row, link);
   });
 }
 

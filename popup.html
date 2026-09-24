@@ -27,6 +27,25 @@
         <button id="notificationAcknowledgeBtn" class="btn btn-secondary notification-acknowledge" type="button" hidden>Entendido</button>
       </section>
 
+      <!-- Aviso: la última captura superó el límite de seguridad. No reemplaza
+           los datos válidos anteriores ni oculta los controles. -->
+      <div id="overLimitBox" class="error-box" hidden>
+        <div class="notification-header">
+          <p id="overLimitText"></p>
+          <button id="overLimitCloseBtn" class="notification-icon-btn" type="button" aria-label="Cerrar aviso">✕</button>
+        </div>
+        <p id="overLimitHint" class="hint-msg"></p>
+      </div>
+
+      <!-- Aviso: la última captura automática falló. Mismo criterio. -->
+      <div id="captureFailedBox" class="error-box" hidden>
+        <div class="notification-header">
+          <p>⚠️ No se pudo capturar automáticamente el último CSV exportado.</p>
+          <button id="captureFailedCloseBtn" class="notification-icon-btn" type="button" aria-label="Cerrar aviso">✕</button>
+        </div>
+        <p id="captureFailedHint" class="hint-msg"></p>
+      </div>
+
       <!-- Estado: home. Los botones siempre están visibles/alcanzables acá,
            exista o no un CSV capturado (v3.0.8) — lo único que cambia según
            haya o no CSV son las estadísticas compactas (se ocultan sin CSV,
@@ -65,17 +84,6 @@
         <p id="clienteFeedback" class="copy-feedback" hidden></p>
         <p id="compatibilityWarning" class="compatibility-warning" hidden></p>
         <p id="csvFeedback" class="copy-feedback" hidden></p>
-      </div>
-
-      <!-- Estado: el CSV capturado supera el límite de seguridad -->
-      <div id="overLimitBox" class="error-box" hidden>
-        <p id="overLimitText"></p>
-      </div>
-
-      <!-- Estado: la captura automática en segundo plano falló -->
-      <div id="captureFailedBox" class="error-box" hidden>
-        <p>⚠️ No se pudo capturar automáticamente el último CSV exportado.</p>
-        <p class="hint-msg">Podés usar las opciones manuales de abajo como respaldo.</p>
       </div>
 
       <!-- Funciones manuales: respaldo, no protagonistas -->

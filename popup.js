@@ -1185,10 +1185,40 @@ async function runAutoDetectFlow() {
 }
 
 // =========================================================================
+// Cierre del popup al perder el foco (restaurado en v3.1.0, como en v3.0.8)
+// =========================================================================
+// En algunos entornos Chrome no cierra el popup al hacer click fuera de él,
+// así que se cierra con window.close() cuando la ventana del popup pierde el
+// foco hacia afuera (página, otra pestaña u otra ventana).
+//
+// - Un click interno sobre una zona sin foco propio puede disparar un "blur"
+//   transitorio: se espera un instante y se confirma con document.hasFocus()
+//   antes de cerrar.
+// - "📄 Procesar otro CSV" abre el selector de archivos nativo, que también
+//   quita el foco: se suspende el cierre justo antes de abrirlo y se reactiva
+//   cuando el popup recupera el foco (archivo elegido o selector cancelado).
+let suppressAutoCloseOnBlur = false;
+
+window.addEventListener("blur", () => {
+  if (suppressAutoCloseOnBlur) return;
+  setTimeout(() => {
+    if (suppressAutoCloseOnBlur) return;
+    if (!document.hasFocus()) {
+      window.close();
+    }
+  }, 0);
+});
+
+window.addEventListener("focus", () => {
+  suppressAutoCloseOnBlur = false;
+});
+
+// =========================================================================
 // Eventos
 // =========================================================================
 
 selectBtn.addEventListener("click", () => {
+  suppressAutoCloseOnBlur = true;
   fileInput.click();
 });
 
@@ -1325,9 +1355,12 @@ async function validateConfiguredCajaAgainstData() {
   if (!currentCsvText) {
     return { ok: false, message: "⚠️ No hay datos capturados. Usá 🔄 Actualizar datos." };
   }
+  // v3.1: la página actual no condiciona el uso del botón. Fuera de
+  // /onu/configured no hay caja seleccionada contra la cual validar
+  // actualidad, así que el informe se genera con el CSV cargado.
   const tab = await getActiveTab();
   if (!tab || !SmartOLTShared.isOnuConfiguredPageUrl(tab.url)) {
-    return { ok: false, message: "⚠️ Abrí /onu/configured en SmartOLT antes de consultar una caja." };
+    return { ok: true };
   }
 
   const selection = await getConfiguredCajaSelection(tab);

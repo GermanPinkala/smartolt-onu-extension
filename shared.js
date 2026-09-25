@@ -43,6 +43,15 @@ const REQUIRED_COLUMNS = [
 // consolidateRecordsBySerial más abajo).
 const SERIAL_COLUMN = "SN";
 
+// Nombres alternativos aceptados para columnas requeridas. SmartOLT renombró
+// "ODB (Splitter)" -> "Splitter" y "ODB Port" -> "Splitter port" en sus
+// exportaciones. El nombre de REQUIRED_COLUMNS sigue siendo el canónico (el que
+// se reporta en MISSING_COLUMNS) y tiene prioridad si el CSV trae ambos.
+const COLUMN_ALIASES = {
+  "ODB (Splitter)": ["Splitter"],
+  "ODB Port": ["Splitter port"],
+};
+
 const TOP_N_SIGNAL = 3;
 
 // OLTs cuya familia puede determinarse con seguridad para comparar el prefijo
@@ -187,6 +196,16 @@ function normalizeHeader(h) {
 function findColumnIndex(headerRow, columnName) {
   const target = normalizeHeader(columnName);
   return headerRow.findIndex((h) => normalizeHeader(h) === target);
+}
+
+// Busca la columna por su nombre canónico y, si no está, por sus alias en orden.
+function findRequiredColumnIndex(headerRow, columnName) {
+  const candidates = [columnName, ...(COLUMN_ALIASES[columnName] || [])];
+  for (const candidate of candidates) {
+    const idx = findColumnIndex(headerRow, candidate);
+    if (idx !== -1) return idx;
+  }
+  return -1;
 }
 
 // ---------- Utilidades de datos ----------
@@ -830,10 +849,13 @@ function parseCajaPortLabel(raw) {
 }
 
 // ---------- Comparación óptica cliente vs promedio de caja ----------
-// Check 1 y Check 2 utilizan una diferencia absoluta máxima de 1.00 dB.
-// No se aplica un margen adicional: la comparación es simétrica para valores
-// dBm más altos o más bajos que el promedio.
+// Margen permitido: 1.00 dB (OPTICAL_TOLERANCE_DB, también usado por Check 3
+// para elegir referencias y para su propio umbral). La aprobación de Check 1
+// y Check 2 agrega APPROVAL_TOLERANCE_DB: aprueba hasta 1.05 dB peor que el
+// promedio (restituido en v3.1, como en v3.0.8). La mejora para entrar en el
+// margen se sigue calculando sobre 1.00 dB.
 const OPTICAL_TOLERANCE_DB = 1;
+const APPROVAL_TOLERANCE_DB = 0.05;
 
 // Redondeada a 2 decimales para evitar que un residuo de punto flotante
 // (0.9999999999...) altere el resultado justo en el límite de 1 dB.
@@ -851,7 +873,7 @@ function isOpticalApproved(clientValue, cajaAvg) {
   if (cajaAvg === null || cajaAvg === undefined) return null;
   if (clientValue >= cajaAvg) return true;
   const worseness = Math.round((cajaAvg - clientValue) * 100) / 100;
-  return worseness <= OPTICAL_TOLERANCE_DB;
+  return worseness <= OPTICAL_TOLERANCE_DB + APPROVAL_TOLERANCE_DB;
 }
 
 // Check 3 usa los promedios de Check 1 y Check 2 únicamente para seleccionar
@@ -928,7 +950,7 @@ const MOTIVATIONAL_BEST_IN_CAJA_MESSAGES = [
   "🎉 ¡Bien jugado! Esta ONU tiene el mejor valor de OP de la caja. 🥇",
   "🫡 ¡Trabajo fino! El OP de esta ONU es el mejor de la caja. 💙",
   "🎊 ¡Qué señal! Esta ONU tiene el mejor OP de toda la caja. ¡Excelente trabajo! 💪🏻",
-  "✨ ¡Primer puesto! Esta ONU tiene el mejor OP de la caja. ¡A seguir así! 🚀",
+  "🚀 ¡Excelente OP!\n✨ Esta ONU tiene el mejor OP de la caja. ¡A seguir así!",
 ];
 
 // Cada plantilla trae el placeholder literal "X,XX", reemplazado en tiempo de
@@ -989,6 +1011,374 @@ function computeMotivationalMessage(clientOnu, caja, cajaInfo, csvRecords, rando
   }
 
   return null;
+}
+
+// ---------- Motor de mensajes de feedback de OP (v3.1) ----------
+// Solo COMUNICA un resultado técnico que ya fue decidido por isOpticalApproved
+// (y Check 3). Nunca decide aprobación: recibe `approved` ya calculado y usa la
+// misma distancia al promedio que las advertencias (opticalDiff). Las
+// categorías son feedback de calidad, no reglas técnicas nuevas.
+//
+// Umbrales en centésimas de dB (enteros, sin huecos ni solapamientos).
+// s = cuánto más desfavorable que el promedio está el cliente (negativo si
+// está mejor). Aprobado siempre implica s <= 105 (1.05 dB).
+//   Aprobado:  s <= -100          -> BETTER_THAN_AVERAGE
+//              -100 < s <= 50     -> NEAR_AVERAGE
+//              50 < s < 70        -> APPROVED
+//              70 <= s <= 100     -> NEAR_LIMIT (quedan 0.30 dB o menos del margen)
+//              100 < s <= 105     -> WITHIN_TOLERANCE (aprobado por muy poco;
+//                                    margen tolerable restante = 1.05 - d)
+//   Fuera (s > 105), con exceso e = s - 100 (lo que falta para entrar en el
+//   margen de 1.00 dB):
+//              e <= 75            -> OUT_VERY_CLOSE
+//              75 < e <= 200      -> OUT_OF_MARGIN
+//              e > 200            -> OUT_FAR
+const OP_FEEDBACK = {
+  BETTER_THAN_AVERAGE: "BETTER_THAN_AVERAGE",
+  NEAR_AVERAGE: "NEAR_AVERAGE",
+  APPROVED: "APPROVED",
+  NEAR_LIMIT: "NEAR_LIMIT",
+  WITHIN_TOLERANCE: "WITHIN_TOLERANCE",
+  OUT_VERY_CLOSE: "OUT_VERY_CLOSE",
+  OUT_OF_MARGIN: "OUT_OF_MARGIN",
+  OUT_FAR: "OUT_FAR",
+  NO_DATA: "NO_DATA",
+  NOT_EVALUABLE: "NOT_EVALUABLE",
+};
+
+const OP_FEEDBACK_THRESHOLDS_CDB = {
+  betterThanAverage: 100,
+  nearAverageWorse: 50,
+  nearLimitWorse: 70,
+  veryCloseExcess: 75,
+  farOutExcess: 200,
+  // Mismas constantes que la regla técnica (isOpticalApproved), en centésimas.
+  marginLimit: Math.round(OPTICAL_TOLERANCE_DB * 100),
+  approvalLimit: Math.round((OPTICAL_TOLERANCE_DB + APPROVAL_TOLERANCE_DB) * 100),
+};
+
+// Componentes combinables por categoría. Dentro de cada categoría, cualquier
+// intro combina con cualquier situación/referencia: las situaciones nunca
+// empiezan con "Para"/"Con" (eso queda para las referencias) y las intros no
+// repiten las palabras de la situación. Sin expresiones direccionales del valor
+// dBm (alto/bajo, arriba/abajo, subir/bajar, más favorable/desfavorable): se
+// habla de distancia al promedio, margen tolerable, mejorar X dB y "mejor".
+// Placeholders: {Side} "El OP ONU", {AlSide} "Al OP ONU", {x} mejora para entrar
+// en el margen, {y} distancia al promedio, {t} margen tolerable restante
+// (1.05 - d). "Margen tolerable" siempre usa {t}; {m} (1.00 - d) ya no se usa
+// en el banco de frases.
+const OP_FEEDBACK_PHRASES = {
+  WITHIN_TOLERANCE: {
+    intro: ["😅 ¡Aprobado por muy poco!", "🫣 ¡Aprobado, pero por muy poco!"],
+    tolerance: ["💡 {Side} tiene solo {t} dB de margen tolerable."],
+    reference: ["🎯 Para alcanzar el promedio de la caja, necesita mejorar {y} dB."],
+  },
+  OUT_VERY_CLOSE: {
+    intro: ["🫣 ¡Qué cerca!", "👀 ¡Casi está!", "💪 ¡Falta muy poco!"],
+    situation: [
+      "{AlSide} le faltan solo {x} dB para entrar en el margen permitido.",
+      "{AlSide} le faltan apenas {x} dB para entrar en el margen permitido.",
+      "{Side} necesita solo {x} dB de mejora para entrar en el margen permitido.",
+    ],
+    reference: [
+      "💡 Con {y} dB de mejora, quedaría al nivel del promedio de la caja.",
+      "✨ Con una mejora de {y} dB alcanzaría el promedio de la caja.",
+      "💡 Para alcanzar el promedio de la caja, la mejora ideal sería de {y} dB.",
+    ],
+  },
+  OUT_OF_MARGIN: {
+    intro: ["🔧 Hay que ajustar un poco más.", "🛠️ Todavía hay trabajo por hacer.", "🔍 Vale la pena revisarlo."],
+    situation: [
+      "{Side} necesita mejorar {x} dB para entrar en el margen permitido.",
+      "{AlSide} le faltan {x} dB para entrar en el margen permitido.",
+      "{Side} requiere {x} dB de mejora para entrar en el margen permitido.",
+    ],
+    reference: [
+      "💡 Para quedar al nivel del promedio de la caja, la mejora sería de {y} dB.",
+      "💡 Para alcanzar el promedio de la caja haría falta mejorar {y} dB.",
+      "🎯 Referencia ideal: con {y} dB de mejora alcanzaría el promedio de la caja.",
+    ],
+  },
+  OUT_FAR: {
+    intro: ["🚨 Necesita atención.", "🔍 Conviene revisarlo.", "🔧 Todavía requiere trabajo."],
+    situation: [
+      "{AlSide} le faltan {x} dB para entrar en el margen permitido.",
+      "{Side} necesita mejorar {x} dB para entrar en el margen permitido.",
+      "{Side} requiere {x} dB de mejora para entrar en el margen permitido.",
+    ],
+    reference: [
+      "💡 Para alcanzar el promedio de la caja, la mejora total sería de {y} dB.",
+      "🎯 Para quedar al nivel del promedio de la caja haría falta mejorar {y} dB.",
+      "💡 Con {y} dB de mejora quedaría al nivel del promedio de la caja.",
+    ],
+  },
+  NEAR_LIMIT: {
+    intro: ["🫣 ¡Por poquito, pero está aprobado!", "👌 Aprobado, aunque por poco.", "😅 ¡Aprobado por muy poco!"],
+    detail: [
+      "💡 {Side} tiene solo {t} dB de margen tolerable.",
+      "💡 {Side} conserva apenas {t} dB de margen tolerable.",
+    ],
+    reference: ["🎯 Para alcanzar el promedio de la caja, necesita mejorar {y} dB."],
+  },
+  APPROVED: {
+    intro: ["✅ ¡OP aprobado!", "👍 ¡Todo en orden!", "👌 ¡Buen trabajo!"],
+    detail: [
+      "💡 {Side} tiene {y} dB de diferencia respecto del promedio de la caja y se mantiene dentro del margen permitido.",
+      "💡 {Side} está a {y} dB del promedio de la caja y se mantiene dentro del margen permitido.",
+      "💡 {Side} queda aprobado con {t} dB de margen tolerable.",
+    ],
+  },
+  NEAR_AVERAGE: {
+    intro: ["😎 ¡OP aprobado!", "✅ ¡Muy buen OP!", "👌 ¡Muy bien!"],
+    detailWorse: [
+      "✨ {Side} está muy cerca del promedio de la caja.",
+      "✨ {Side} queda prácticamente al nivel del promedio de la caja.",
+      "✨ {Side} está a solo {y} dB del promedio de la caja.",
+    ],
+    detailEqual: ["✨ {Side} está justo al nivel del promedio de la caja."],
+    detailBetter: [
+      "✨ {Side} está {y} dB mejor que el promedio de la caja.",
+    ],
+  },
+};
+
+// Frases compactas para combinar ONU y OLT en pocas líneas. {xOnu}/{xOlt}:
+// mejora para entrar en el margen; {yOnu}/{yOlt}: mejora para alcanzar el
+// promedio; {t*}: margen tolerable restante (1.05 - d); {side}: "ONU" | "OLT".
+const OP_FEEDBACK_COMBINED_PHRASES = {
+  margin: [
+    "Para entrar en el margen permitido: mejorar ONU {xOnu} dB y OLT {xOlt} dB.",
+    "Para entrar en el margen permitido hace falta mejorar ONU {xOnu} dB y OLT {xOlt} dB.",
+    "Mejora necesaria para entrar en el margen permitido: ONU {xOnu} dB y OLT {xOlt} dB.",
+  ],
+  average: [
+    "💡 Para alcanzar el promedio de la caja: mejorar ONU {yOnu} dB y OLT {yOlt} dB.",
+    "💡 Para quedar al nivel del promedio de la caja: mejorar ONU {yOnu} dB y OLT {yOlt} dB.",
+    "🎯 Mejora ideal para alcanzar el promedio de la caja: ONU {yOnu} dB y OLT {yOlt} dB.",
+  ],
+  // Lado aprobado cerca del límite, agregado como una sola línea al bloque existente.
+  nearLimitNote: [
+    "📌 {side} aprobado. Tiene solo {t} dB de margen tolerable y necesita mejorar {y} dB para alcanzar el promedio de la caja.",
+    "📌 {side} aprobado. Le quedan {t} dB de margen tolerable y necesita mejorar {y} dB para alcanzar el promedio de la caja.",
+  ],
+  // Ambos lados aprobados y cerca del límite ({tOnu}/{tOlt}: 1.05 - d).
+  bothNearLimit: [
+    "💡 Margen tolerable: ONU {tOnu} dB y OLT {tOlt} dB.",
+    "💡 Margen tolerable restante: ONU {tOnu} dB y OLT {tOlt} dB.",
+  ],
+  bothNearLimitAverage: ["🎯 Para alcanzar el promedio de la caja: mejorar ONU {yOnu} dB y OLT {yOlt} dB."],
+  // Lado aprobado por muy poco (1.00 < d <= 1.05), como una sola línea.
+  withinToleranceNote: [
+    "📌 {side} aprobado por muy poco: le quedan solo {t} dB de margen tolerable y necesita mejorar {y} dB para alcanzar el promedio de la caja.",
+  ],
+  // Ambos lados aprobados por muy poco: reemplaza las dos líneas de detalle.
+  bothWithinTolerance: [
+    "💡 Margen tolerable restante: ONU {tOnu} dB y OLT {tOlt} dB.",
+    "🎯 Para alcanzar el promedio de la caja: mejorar ONU {yOnu} dB y OLT {yOlt} dB.",
+  ],
+};
+
+const OP_FEEDBACK_SEVERITY = [OP_FEEDBACK.OUT_VERY_CLOSE, OP_FEEDBACK.OUT_OF_MARGIN, OP_FEEDBACK.OUT_FAR];
+
+// Datos para el mensaje, derivados de los mismos cálculos existentes:
+// opticalDiff (distancia absoluta al promedio, redondeada) y
+// OPTICAL_TOLERANCE_DB. toMargin es exactamente la misma resta que usaba
+// "⚠️ Debe mejorar ... al menos X dB".
+function getOpFeedbackData(clientValue, cajaAvg) {
+  const diff = opticalDiff(clientValue, cajaAvg);
+  if (diff === null) return null;
+  const isWorse = clientValue < cajaAvg;
+  return {
+    diff,
+    worseCdb: Math.round(diff * 100) * (isWorse ? 1 : -1),
+    toAverage: diff,
+    toMargin: diff - OPTICAL_TOLERANCE_DB,
+    marginLeft: OPTICAL_TOLERANCE_DB - diff,
+    // En centésimas para que 1.05 - 1.01 dé exactamente 0.04.
+    toleranceLeft: (OP_FEEDBACK_THRESHOLDS_CDB.approvalLimit - Math.round(diff * 100)) / 100,
+  };
+}
+
+// `approved` es el resultado técnico ya calculado (true/false/null). Devuelve
+// null si el resultado técnico no es coherente con una distancia al promedio
+// (p. ej. OLT aceptado por Check 3): en ese caso no se genera mensaje.
+function classifyOpFeedback(approved, data) {
+  if (!data) return OP_FEEDBACK.NO_DATA;
+  if (approved !== true && approved !== false) return OP_FEEDBACK.NOT_EVALUABLE;
+  const t = OP_FEEDBACK_THRESHOLDS_CDB;
+  const s = data.worseCdb;
+  if (approved) {
+    if (s > t.approvalLimit) return null;
+    if (s <= -t.betterThanAverage) return OP_FEEDBACK.BETTER_THAN_AVERAGE;
+    if (s <= t.nearAverageWorse) return OP_FEEDBACK.NEAR_AVERAGE;
+    if (s < t.nearLimitWorse) return OP_FEEDBACK.APPROVED;
+    if (s <= t.marginLimit) return OP_FEEDBACK.NEAR_LIMIT;
+    return OP_FEEDBACK.WITHIN_TOLERANCE;
+  }
+  if (s <= t.approvalLimit) return null;
+  const e = s - t.marginLimit;
+  if (e <= t.veryCloseExcess) return OP_FEEDBACK.OUT_VERY_CLOSE;
+  if (e <= t.farOutExcess) return OP_FEEDBACK.OUT_OF_MARGIN;
+  return OP_FEEDBACK.OUT_FAR;
+}
+
+function fillOpFeedbackTemplate(template, side, data) {
+  const values = {
+    Side: `El OP ${side}`,
+    AlSide: `Al OP ${side}`,
+    x: formatDb(data.toMargin),
+    y: formatDb(data.toAverage),
+    m: formatDb(data.marginLeft),
+    t: formatDb(data.toleranceLeft),
+  };
+  return template.replace(/\{(Side|AlSide|x|y|m|t)\}/g, (_, key) => values[key]);
+}
+
+// Devuelve { category, lines } — lines vacío en NO_DATA / NOT_EVALUABLE (se
+// mantiene el comportamiento actual: N/D y advertencias, sin mensaje nuevo).
+// side: "ONU" | "OLT". randomFn: mismo punto de inyección que los mensajes
+// motivacionales.
+function buildOpFeedback(side, clientValue, cajaAvg, approved, randomFn) {
+  const rand = typeof randomFn === "function" ? randomFn : Math.random;
+  const data = getOpFeedbackData(clientValue, cajaAvg);
+  const category = classifyOpFeedback(approved, data);
+  if (!category || category === OP_FEEDBACK.NO_DATA || category === OP_FEEDBACK.NOT_EVALUABLE) {
+    return { category, lines: [] };
+  }
+  const fill = (template) => fillOpFeedbackTemplate(template, side, data);
+  const phrases = OP_FEEDBACK_PHRASES[category];
+
+  if (category === OP_FEEDBACK.BETTER_THAN_AVERAGE) {
+    // Mismas frases que ya se usaban para "1 dB o más mejor que el promedio".
+    const template = pickRandomMessage(MOTIVATIONAL_BETTER_THAN_AVERAGE_MESSAGES, rand);
+    return { category, lines: [template.replace("X,XX", formatDb(data.diff))] };
+  }
+
+  if (category === OP_FEEDBACK.WITHIN_TOLERANCE) {
+    // Tres líneas: intro, margen tolerable restante (1.05 - d) y mejora para
+    // alcanzar el promedio (d). Son valores distintos y cada uno va rotulado.
+    return {
+      category,
+      lines: [
+        pickRandomMessage(phrases.intro, rand),
+        fill(pickRandomMessage(phrases.tolerance, rand)),
+        fill(pickRandomMessage(phrases.reference, rand)),
+      ],
+    };
+  }
+
+  if (phrases.situation) {
+    // Fuera del margen: intro + situación en una línea, referencia al promedio en otra.
+    const intro = pickRandomMessage(phrases.intro, rand);
+    const situation = fill(pickRandomMessage(phrases.situation, rand));
+    const reference = fill(pickRandomMessage(phrases.reference, rand));
+    return { category, lines: [`${intro} ${situation}`, reference] };
+  }
+
+  let details;
+  if (category === OP_FEEDBACK.NEAR_LIMIT) {
+    details = phrases.detail;
+  } else if (category === OP_FEEDBACK.NEAR_AVERAGE) {
+    details = data.worseCdb > 0 ? phrases.detailWorse : data.worseCdb === 0 ? phrases.detailEqual : phrases.detailBetter;
+  } else {
+    details = phrases.detail;
+  }
+  const intro = pickRandomMessage(phrases.intro, rand);
+  const detail = fill(pickRandomMessage(details, rand));
+  // NEAR_LIMIT (0.70–1.00) informa además la mejora para alcanzar el promedio (d).
+  if (phrases.reference) {
+    return { category, lines: [intro, detail, fill(pickRandomMessage(phrases.reference, rand))] };
+  }
+  return { category, lines: [intro, detail] };
+}
+
+// Lados fuera del margen (entries: [{ side, clientValue, cajaAvg, approved }]).
+// Con un solo lado usa buildOpFeedback tal cual. Con ONU y OLT fuera, dos
+// líneas: margen (ONU + OLT) y promedio (ONU + OLT); la intro sale de la
+// categoría más severa de las dos. Mismas cifras que buildOpFeedback.
+function buildOutOfMarginFeedback(entries, randomFn) {
+  const rand = typeof randomFn === "function" ? randomFn : Math.random;
+  if (entries.length === 1) {
+    const e = entries[0];
+    return buildOpFeedback(e.side, e.clientValue, e.cajaAvg, e.approved, rand).lines;
+  }
+  const bySide = {};
+  let worst = -1;
+  entries.forEach((e) => {
+    const data = getOpFeedbackData(e.clientValue, e.cajaAvg);
+    bySide[e.side] = data;
+    worst = Math.max(worst, OP_FEEDBACK_SEVERITY.indexOf(classifyOpFeedback(e.approved, data)));
+  });
+  if (!bySide.ONU || !bySide.OLT || worst === -1) return [];
+  const values = {
+    xOnu: formatDb(bySide.ONU.toMargin),
+    xOlt: formatDb(bySide.OLT.toMargin),
+    yOnu: formatDb(bySide.ONU.toAverage),
+    yOlt: formatDb(bySide.OLT.toAverage),
+  };
+  const fill = (t) => t.replace(/\{(xOnu|xOlt|yOnu|yOlt)\}/g, (_, k) => values[k]);
+  const intro = pickRandomMessage(OP_FEEDBACK_PHRASES[OP_FEEDBACK_SEVERITY[worst]].intro, rand);
+  const margin = fill(pickRandomMessage(OP_FEEDBACK_COMBINED_PHRASES.margin, rand));
+  const average = fill(pickRandomMessage(OP_FEEDBACK_COMBINED_PHRASES.average, rand));
+  return [`${intro} ${margin}`, average];
+}
+
+// Una línea compacta para un lado aprobado pero cerca del límite; null en
+// cualquier otra categoría.
+function buildNearLimitNote(side, clientValue, cajaAvg, approved, randomFn) {
+  const rand = typeof randomFn === "function" ? randomFn : Math.random;
+  const data = getOpFeedbackData(clientValue, cajaAvg);
+  if (classifyOpFeedback(approved, data) !== OP_FEEDBACK.NEAR_LIMIT) return null;
+  return pickRandomMessage(OP_FEEDBACK_COMBINED_PHRASES.nearLimitNote, rand)
+    .replace("{side}", side)
+    .replace("{t}", formatDb(data.toleranceLeft))
+    .replace("{y}", formatDb(data.toAverage));
+}
+
+// Ambos aprobados y cerca del límite: reemplaza las líneas de detalle de ONU
+// por dos líneas con los dos lados (margen tolerable y mejora al promedio).
+function buildBothNearLimitDetail(onuClient, onuAvg, oltClient, oltAvg, randomFn) {
+  const rand = typeof randomFn === "function" ? randomFn : Math.random;
+  const onu = getOpFeedbackData(onuClient, onuAvg);
+  const olt = getOpFeedbackData(oltClient, oltAvg);
+  const values = {
+    tOnu: formatDb(onu.toleranceLeft),
+    tOlt: formatDb(olt.toleranceLeft),
+    yOnu: formatDb(onu.toAverage),
+    yOlt: formatDb(olt.toAverage),
+  };
+  const fill = (t) => t.replace(/\{(tOnu|tOlt|yOnu|yOlt)\}/g, (_, k) => values[k]);
+  return [
+    fill(pickRandomMessage(OP_FEEDBACK_COMBINED_PHRASES.bothNearLimit, rand)),
+    fill(pickRandomMessage(OP_FEEDBACK_COMBINED_PHRASES.bothNearLimitAverage, rand)),
+  ];
+}
+
+// Una línea compacta para un lado aprobado por muy poco (1.00 < d <= 1.05);
+// null en cualquier otra categoría.
+function buildWithinToleranceNote(side, clientValue, cajaAvg, approved, randomFn) {
+  const rand = typeof randomFn === "function" ? randomFn : Math.random;
+  const data = getOpFeedbackData(clientValue, cajaAvg);
+  if (classifyOpFeedback(approved, data) !== OP_FEEDBACK.WITHIN_TOLERANCE) return null;
+  return pickRandomMessage(OP_FEEDBACK_COMBINED_PHRASES.withinToleranceNote, rand)
+    .replace("{side}", side)
+    .replace("{t}", formatDb(data.toleranceLeft))
+    .replace("{y}", formatDb(data.toAverage));
+}
+
+// Ambos aprobados por muy poco: las dos líneas de detalle con ONU y OLT juntos.
+function buildBothWithinToleranceDetail(onuClient, onuAvg, oltClient, oltAvg) {
+  const onu = getOpFeedbackData(onuClient, onuAvg);
+  const olt = getOpFeedbackData(oltClient, oltAvg);
+  const values = {
+    tOnu: formatDb(onu.toleranceLeft),
+    tOlt: formatDb(olt.toleranceLeft),
+    yOnu: formatDb(onu.toAverage),
+    yOlt: formatDb(olt.toAverage),
+  };
+  return OP_FEEDBACK_COMBINED_PHRASES.bothWithinTolerance.map((t) =>
+    t.replace(/\{(tOnu|tOlt|yOnu|yOlt)\}/g, (_, k) => values[k])
+  );
 }
 
 // ---------- Dato actual vs. CSV desactualizado (v3.0.7), SOLO para "OBTENER
@@ -1175,7 +1565,10 @@ function buildClientReport(clientData, csvRecords, randomFn) {
   const oltClientPart = `OLT ${clientOltStr}${clientOltStr !== "N/D" ? " dBm" : ""}`;
   const canCompare = !!(cajaInfo && cajaInfo.kind === "OK");
 
-  let improvementWarning = null;
+  const improvementBlocks = [];
+  let oltNearLimit = false;
+  let oltWithinTolerance = false;
+  let onuWithinTolerance = false;
   // Hoisteados fuera del if para que la sección de mensaje motivacional (más
   // abajo) pueda usarlos: null significa "no se pudo determinar" (nunca se
   // trata como aprobado ni como reprobado).
@@ -1184,10 +1577,9 @@ function buildClientReport(clientData, csvRecords, randomFn) {
   let check3 = { status: "not_run" };
 
   if (canCompare) {
-    // onuDiff/oltDiff son las diferencias absolutas usadas por los warnings.
     // onuOk/oltOk aplican la tolerancia exacta de 1.00 dB para cada check.
-    const onuDiff = opticalDiff(clientOnu, cajaInfo.onuResult.avg);
-    const oltDiff = opticalDiff(clientOlt, cajaInfo.oltResult.avg);
+    // (Las diferencias absolutas para los mensajes las calcula buildOpFeedback
+    // con la misma función opticalDiff.)
     onuOk = isOpticalApproved(clientOnu, cajaInfo.onuResult.avg);
     oltOk = isOpticalApproved(clientOlt, cajaInfo.oltResult.avg);
 
@@ -1242,26 +1634,39 @@ function buildClientReport(clientData, csvRecords, randomFn) {
     // que un lado sin dato está mal).
     // v3.0.7: el valor mostrado es CUÁNTO le falta al cliente para entrar en
     // la zona segura de OPTICAL_TOLERANCE_DB (1.00 dB) — es decir, el exceso
-    // de la diferencia real (onuDiff/oltDiff) por encima de esa zona, no la
+    // de la diferencia real (opticalDiff) por encima de esa zona, no la
     // diferencia real completa. Solo puede llegar acá un lado con onuOk/oltOk
     // === false, y eso solo ocurre cuando la diferencia superó la zona segura,
     // así que la resta siempre da un número positivo.
+    // v3.1: el texto lo arma el motor de feedback (buildOpFeedback), un bloque
+    // por cada lado fuera de margen, con la mejora para entrar en el margen
+    // (misma cifra que antes: diff - OPTICAL_TOLERANCE_DB) y la mejora para
+    // alcanzar el promedio. La decisión (onuOk/oltOk/check3) no cambia.
     if (bothEvaluable) {
-      const warnings = [];
-      if (onuOk === false) warnings.push(`OP ONU al menos ${formatDb(onuDiff - OPTICAL_TOLERANCE_DB)} dB`);
+      // Si ONU y OLT están fuera, se combinan en dos líneas (margen y promedio).
+      const outOfMargin = [];
+      if (onuOk === false) {
+        outOfMargin.push({ side: "ONU", clientValue: clientOnu, cajaAvg: cajaInfo.onuResult.avg, approved: onuOk });
+      }
       if (oltOk === false && check3.status !== "passed") {
-        warnings.push(`OP OLT al menos ${formatDb(oltDiff - OPTICAL_TOLERANCE_DB)} dB`);
+        outOfMargin.push({ side: "OLT", clientValue: clientOlt, cajaAvg: cajaInfo.oltResult.avg, approved: oltOk });
       }
-      if (warnings.length > 0) {
-        improvementWarning = `⚠️ Debe mejorar ${warnings.join(" y ")}`;
-      }
+      // Check 3 sigue decidiendo (effectiveOltOk / badge) pero ya no agrega un
+      // mensaje propio: si falla, el OLT queda fuera del margen y su bloque
+      // dinámico ya informa la mejora para el margen y para el promedio.
+      if (outOfMargin.length > 0) improvementBlocks.push(buildOutOfMarginFeedback(outOfMargin, rand));
 
-      if (check3.status === "failed") {
-        const check3Warning = "para que la relación ONU/OLT quede acorde al comportamiento de la caja.";
-        improvementWarning = improvementWarning
-          ? `${improvementWarning} ${check3Warning}`
-          : `⚠️ Debe mejorar OP OLT ${check3Warning}`;
-      }
+      // OP OLT aprobado por Check 2 pero a 0.30 dB o menos del límite: se
+      // informa en una sola línea dentro del bloque que corresponda.
+      const oltCategory =
+        oltOk === true ? classifyOpFeedback(oltOk, getOpFeedbackData(clientOlt, cajaInfo.oltResult.avg)) : null;
+      oltNearLimit = oltCategory === OP_FEEDBACK.NEAR_LIMIT;
+      // Aprobados por muy poco (1.00 < d <= 1.05), también en una sola línea
+      // cuando no tienen su propio bloque.
+      oltWithinTolerance = oltCategory === OP_FEEDBACK.WITHIN_TOLERANCE;
+      onuWithinTolerance =
+        onuOk === true &&
+        classifyOpFeedback(onuOk, getOpFeedbackData(clientOnu, cajaInfo.onuResult.avg)) === OP_FEEDBACK.WITHIN_TOLERANCE;
     }
   } else {
     // Sin promedio calculable (caja no coincide, sin CSV, o caja sin OP
@@ -1281,15 +1686,79 @@ function buildClientReport(clientData, csvRecords, randomFn) {
   const motivationalMessage = bothApproved
     ? computeMotivationalMessage(clientOnu, caja, cajaInfo, evalRecords.adjustedRecords, rand)
     : null;
+  // v3.1: si no es la mejor OP de la caja ni 1 dB mejor que el promedio (los
+  // casos motivacionales de siempre), el motor describe el OP ONU aprobado.
+  const approvedFeedback =
+    bothApproved && !motivationalMessage
+      ? buildOpFeedback("ONU", clientOnu, cajaInfo.onuResult.avg, onuOk, rand)
+      : null;
+  const approvedFeedbackLines = motivationalMessage
+    ? [motivationalMessage]
+    : approvedFeedback
+      ? approvedFeedback.lines.slice()
+      : [];
 
-  if (improvementWarning) {
-    lines.push("");
-    lines.push(improvementWarning);
+  // OLT aprobado cerca del límite: nunca un bloque aparte. Si ONU también
+  // está cerca del límite, una sola línea con ambos márgenes; si no, una
+  // línea breve al final del bloque existente (feedback positivo o de ONU).
+  // Caso mixto (un lado en 0.70–1.00 y el otro en 1.01–1.05): mismo formato
+  // compacto de dos líneas que "ambos cerca del límite" — las cifras son las
+  // mismas fórmulas (1.05 - d y d) de cada lado.
+  const onuCloseToLimit =
+    !!approvedFeedback &&
+    (approvedFeedback.category === OP_FEEDBACK.NEAR_LIMIT || approvedFeedback.category === OP_FEEDBACK.WITHIN_TOLERANCE);
+  const mixedCloseToLimit =
+    onuCloseToLimit &&
+    ((oltNearLimit && approvedFeedback.category === OP_FEEDBACK.WITHIN_TOLERANCE) ||
+      (oltWithinTolerance && approvedFeedback.category === OP_FEEDBACK.NEAR_LIMIT));
+  if (mixedCloseToLimit) {
+    approvedFeedbackLines.splice(
+      1,
+      2,
+      ...buildBothNearLimitDetail(clientOnu, cajaInfo.onuResult.avg, clientOlt, cajaInfo.oltResult.avg, rand)
+    );
+  } else if (oltNearLimit) {
+    if (approvedFeedback && approvedFeedback.category === OP_FEEDBACK.NEAR_LIMIT) {
+      approvedFeedbackLines.splice(
+        1,
+        2,
+        ...buildBothNearLimitDetail(clientOnu, cajaInfo.onuResult.avg, clientOlt, cajaInfo.oltResult.avg, rand)
+      );
+    } else {
+      const note = buildNearLimitNote("OLT", clientOlt, cajaInfo.oltResult.avg, oltOk, rand);
+      const target = approvedFeedbackLines.length > 0 ? approvedFeedbackLines : improvementBlocks[0];
+      if (target) target.push(note);
+    }
   }
 
-  if (motivationalMessage) {
+  // Aprobados por muy poco: si ONU y OLT lo están, un solo bloque con ambos
+  // valores; si solo uno tiene su propio bloque, el otro va en una línea.
+  if (oltWithinTolerance && !mixedCloseToLimit) {
+    if (approvedFeedback && approvedFeedback.category === OP_FEEDBACK.WITHIN_TOLERANCE) {
+      approvedFeedbackLines.splice(
+        1,
+        2,
+        ...buildBothWithinToleranceDetail(clientOnu, cajaInfo.onuResult.avg, clientOlt, cajaInfo.oltResult.avg)
+      );
+    } else {
+      const note = buildWithinToleranceNote("OLT", clientOlt, cajaInfo.oltResult.avg, oltOk, rand);
+      const target = approvedFeedbackLines.length > 0 ? approvedFeedbackLines : improvementBlocks[0];
+      if (target) target.push(note);
+    }
+  }
+  if (onuWithinTolerance && !bothApproved && improvementBlocks[0]) {
+    improvementBlocks[0].push(buildWithinToleranceNote("ONU", clientOnu, cajaInfo.onuResult.avg, onuOk, rand));
+  }
+
+  improvementBlocks.forEach((block) => {
+    if (block.length === 0) return;
     lines.push("");
-    lines.push(motivationalMessage);
+    lines.push(...block);
+  });
+
+  if (approvedFeedbackLines.length > 0) {
+    lines.push("");
+    lines.push(...approvedFeedbackLines);
   }
 
   if (compatibilityWarning) {
@@ -1316,7 +1785,7 @@ function parseRecordsFromCSV(text) {
 
   const header = rows[0];
 
-  const anyMatch = REQUIRED_COLUMNS.some((col) => findColumnIndex(header, col) !== -1);
+  const anyMatch = REQUIRED_COLUMNS.some((col) => findRequiredColumnIndex(header, col) !== -1);
   if (!anyMatch) {
     return { ok: false, code: "NOT_SMARTOLT" };
   }
@@ -1324,7 +1793,7 @@ function parseRecordsFromCSV(text) {
   const colIndex = {};
   const missing = [];
   REQUIRED_COLUMNS.forEach((col) => {
-    const idx = findColumnIndex(header, col);
+    const idx = findRequiredColumnIndex(header, col);
     if (idx === -1) missing.push(col);
     else colIndex[col] = idx;
   });
@@ -1545,6 +2014,47 @@ const TAP_EASTER_EGG_DISPLAY_MS = 10000;
 // con notification.enabled generan una novedad pendiente.
 const CHANGELOG_ENTRIES = [
   {
+    version: "3.1.0",
+    changes: [
+      {
+        title: "💬 Feedback dinámico de OP ONU / OLT",
+        text: "El mensaje de la consulta de cliente ahora se adapta según qué tan cerca o lejos está el OP del promedio de la caja y del margen de aprobación.",
+      },
+      {
+        title: "🎯 Dos referencias de mejora",
+        text: "Cuando un OP queda fuera del margen, se informa por separado la mejora mínima necesaria para entrar en el margen permitido y la mejora necesaria para alcanzar el promedio de la caja.",
+      },
+      {
+        title: "📐 Margen tolerable",
+        text: "Los OP aprobados cerca del límite informan el margen tolerable restante, calculado a partir del límite técnico de aprobación.",
+      },
+      {
+        title: "✅ Límite de aprobación de 1.05 dB restaurado",
+        text: "Se aprueba nuevamente hasta 1.05 dB de diferencia respecto del promedio de referencia: los casos entre 1.01 y 1.05 dB vuelven a quedar aprobados, 1.05 dB exacto se aprueba y por encima de 1.05 dB se rechaza.",
+      },
+      {
+        title: "🗂️ Mensajes diferenciados",
+        text: "Nuevos mensajes para OP cercano al promedio, cercano al límite, aprobado por muy poco y fuera del margen.",
+      },
+      {
+        title: "🔀 ONU y OLT, por separado o combinados",
+        text: "El feedback se muestra por separado o combinado para ONU y OLT, incluso cuando cada uno está en una situación distinta.",
+      },
+      {
+        title: "ℹ️ El feedback no decide la aprobación",
+        text: "Los mensajes solo explican el resultado: la aprobación técnica (✅ / ❌) se sigue decidiendo por separado con las reglas de evaluación.",
+      },
+      {
+        title: "🧩 Hotfix: nuevos encabezados del CSV de SmartOLT",
+        text: "Corrección por el cambio de encabezados del CSV de SmartOLT del 25/09/2026: \"ODB (Splitter)\" también puede venir como \"Splitter\" y \"ODB Port\" como \"Splitter port\". Si el CSV trae ambos, se priorizan los nombres anteriores. Los CSV anteriores siguen funcionando igual.",
+      },
+      {
+        title: "🔎 ESTADO DE CAJA desde cualquier página",
+        text: "El botón 🔎 ESTADO DE CAJA ahora puede usarse con datos cargados aunque no estés en /onu/configured. En /onu/configured se sigue verificando que la caja seleccionada esté en los datos.",
+      },
+    ],
+  },
+  {
     version: "3.0.12",
     changes: [
       {
@@ -1728,6 +2238,19 @@ const SmartOLTShared = {
   computeMotivationalMessage,
   MOTIVATIONAL_BEST_IN_CAJA_MESSAGES,
   MOTIVATIONAL_BETTER_THAN_AVERAGE_MESSAGES,
+  OP_FEEDBACK,
+  OP_FEEDBACK_THRESHOLDS_CDB,
+  OP_FEEDBACK_PHRASES,
+  getOpFeedbackData,
+  classifyOpFeedback,
+  buildOpFeedback,
+  OP_FEEDBACK_COMBINED_PHRASES,
+  buildOutOfMarginFeedback,
+  buildNearLimitNote,
+  buildBothNearLimitDetail,
+  buildWithinToleranceNote,
+  buildBothWithinToleranceDetail,
+  APPROVAL_TOLERANCE_DB,
   formatShortDateTime,
   prependCsvTimestamp,
   formatFooterVersion,

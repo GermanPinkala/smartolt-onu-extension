@@ -835,17 +835,213 @@ function formatSpanishList(numbers) {
 // nombre real de la caja es "A47B1" y el puerto es "8". Si se compara la caja
 // del cliente contra las del CSV usando el texto completo ("A47B1 (Port 8)"),
 // nunca va a coincidir con "A47B1" del CSV — por eso hay que separarlos ANTES
-// de comparar. Si el texto no trae "(Port N)", se devuelve tal cual (puerto
-// null, para no pisar un puerto ya obtenido por otro campo de la página).
+// de comparar. Acepta "(Port N)" y "(Puerto N)"; si no trae ninguno, se
+// devuelve tal cual (puerto null). Hoy solo se usa para las opciones de #odb:
+// la ficha /onu/view usa readNapDivisorBlock + resolveNapCajaPort (abajo).
 function parseCajaPortLabel(raw) {
   if (!raw) return { caja: raw || "", puerto: null };
   const m = String(raw)
     .trim()
-    .match(/^(.*?)\s*\(\s*port\s*[:#]?\s*(\d+)\s*\)\s*$/i);
+    .match(/^(.*?)\s*\(\s*(?:port|puerto)\s*[:#]?\s*(\d+)\s*\)\s*$/i);
   if (m) {
     return { caja: m[1].trim(), puerto: m[2] };
   }
   return { caja: String(raw).trim(), puerto: null };
+}
+
+// ---------- Bloque "NAP (Divisor)" de la ficha /onu/view ----------
+// Estructura real de SmartOLT (2026-09):
+//   <dt>NAP (Divisor) …</dt>
+//   <dd><span class="onu-odb-glyph"><svg>…</svg></span>
+//       <a class="update-location-details" data-odb-id="…" data-odb-port="7">D60B5 (Puerto 7)</a></dd>
+// Formato anterior: "D60B5 (Port 7)" como texto del valor.
+//
+// readNapDivisorBlock SÍ lee el DOM: no se llama desde este archivo, sino que
+// popup.js la inyecta en la pestaña con chrome.scripting.executeScript (por
+// eso es autocontenida: no usa nada del scope externo). Solo UBICA el bloque
+// y devuelve los datos crudos; la interpretación es resolveNapCajaPort (pura).
+// Ni íconos, ni SVG, ni emojis, ni la cantidad de hijos cambian el resultado.
+function readNapDivisorBlock() {
+  const LABEL_KEY = "napdivisor";
+  const NON_TEXT_TAGS = ["svg", "script", "style", "template", "noscript"];
+  const ANCHOR_SELECTOR = "a.update-location-details, [data-odb-port]";
+
+  // Texto visible sin el contenido de elementos no textuales (p. ej. el
+  // <title> de un <svg>, que forma parte de textContent pero no es un dato).
+  function plainText(node) {
+    if (!node) return "";
+    if (node.nodeType === 3) return node.nodeValue || "";
+    if (node.nodeType !== 1) return "";
+    if (NON_TEXT_TAGS.includes(String(node.localName || "").toLowerCase())) return " ";
+    let out = "";
+    node.childNodes.forEach((child) => {
+      out += plainText(child);
+    });
+    return out;
+  }
+
+  function norm(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  // Solo letras, sin acentos: "NAP (Divisor):", "NAP(Divisor) 📍" -> "napdivisor".
+  function labelKey(value) {
+    return String(value || "").normalize("NFD").toLowerCase().replace(/[^a-z]/g, "");
+  }
+
+  function isNapLabel(el, allowSuffix) {
+    const key = labelKey(plainText(el));
+    if (key === LABEL_KEY) return true;
+    // Un sufijo corto (ayuda, badge) se tolera solo en el <dt>.
+    return allowSuffix && key.startsWith(LABEL_KEY) && key.length <= LABEL_KEY.length + 20;
+  }
+
+  function fromValueElement(valueEl, source) {
+    const anchor = valueEl.matches(ANCHOR_SELECTOR)
+      ? valueEl
+      : valueEl.querySelector("a.update-location-details") || valueEl.querySelector("[data-odb-port]");
+    if (anchor) {
+      return {
+        found: true,
+        source: anchor.matches("a.update-location-details") ? "anchor" : "odb-attribute",
+        anchorText: norm(plainText(anchor)),
+        portAttr: anchor.hasAttribute("data-odb-port") ? anchor.getAttribute("data-odb-port") : null,
+        odbId: anchor.hasAttribute("data-odb-id") ? anchor.getAttribute("data-odb-id") : null,
+        text: norm(plainText(valueEl)),
+      };
+    }
+    return { found: true, source, anchorText: null, portAttr: null, odbId: null, text: norm(plainText(valueEl)) };
+  }
+
+  // 1) Estructura actual: <dt> NAP (Divisor) -> <dd> siguiente.
+  const dts = Array.from(document.getElementsByTagName("dt"));
+  for (const dt of dts) {
+    if (!isNapLabel(dt, true)) continue;
+    let sib = dt.nextElementSibling;
+    while (sib && sib.tagName !== "DD" && sib.tagName !== "DT") sib = sib.nextElementSibling;
+    if (!sib || sib.tagName !== "DD") return { found: true, source: "dt-without-dd", text: null };
+    return fromValueElement(sib, "dd-text");
+  }
+
+  // 2) Formato anterior: celda de tabla / etiqueta + hermano con el valor, o
+  //    "NAP (Divisor): D1FA1 (Port 6)" en un mismo elemento.
+  const INLINE_RE = /^nap\s*\(\s*divisor\s*\)\s*:\s*(.+)$/i;
+  const candidates = Array.from(document.querySelectorAll("th,td,label,span,div,strong,b,p"));
+  for (const el of candidates) {
+    const inline = norm(plainText(el)).match(INLINE_RE);
+    if (inline) {
+      // Se usa el elemento más interno que trae el texto completo.
+      const inner = Array.from(el.children).some((child) => INLINE_RE.test(norm(plainText(child))));
+      if (!inner) return { found: true, source: "legacy-inline", anchorText: null, portAttr: null, odbId: null, text: norm(inline[1]) };
+      continue;
+    }
+    if (!isNapLabel(el, false)) continue;
+    let valueEl = null;
+    const row = el.closest("tr");
+    if (row && (el.tagName === "TH" || el.tagName === "TD")) {
+      const cells = Array.from(row.children);
+      valueEl = cells.slice(cells.indexOf(el) + 1).find((cell) => norm(plainText(cell))) || null;
+    } else {
+      let sib = el.nextElementSibling;
+      while (sib && !norm(plainText(sib)) && !sib.matches(ANCHOR_SELECTOR) && !sib.querySelector("[data-odb-port]")) {
+        sib = sib.nextElementSibling;
+      }
+      valueEl = sib;
+    }
+    if (valueEl) return fromValueElement(valueEl, "legacy-text");
+  }
+
+  return { found: false, source: null, text: null };
+}
+
+const NAP_PORT_TEXT_RE = /\(\s*(?:port|puerto)\s*[:#.]?\s*(\d+)\s*\)/gi;
+// Nombre de caja: alfanumérico, con . _ - / o espacios simples internos.
+const NAP_CAJA_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._/-]| (?=[A-Za-z0-9]))*$/;
+// Valores de relleno que SmartOLT u otra vista pueden mostrar sin caja real.
+const NAP_PLACEHOLDER_RE = /^(?:n\/?a|n\/?d|none|null|sin (?:caja|nap|asignar)|no asignad[ao]|not set|unassigned)$/i;
+
+function positivePortOrNull(value) {
+  const m = String(value === null || value === undefined ? "" : value).trim().match(/^\d+$/);
+  if (!m) return null;
+  const n = Number(m[0]);
+  return n >= 1 ? String(n) : null;
+}
+
+// Puertos "(Port N)"/"(Puerto N)" presentes en un texto (sin repetir).
+function napTextPorts(text) {
+  const ports = [];
+  String(text || "").replace(NAP_PORT_TEXT_RE, (all, n) => {
+    const p = positivePortOrNull(n);
+    if (p && !ports.includes(p)) ports.push(p);
+    return all;
+  });
+  return ports;
+}
+
+// Caja a partir de un texto: lo que queda sin "(Port/Puerto N)" y sin
+// decoraciones en los extremos (emojis, símbolos). strict = true (textos sin
+// ancla estructural) exige un único token; si no, se devuelve null.
+function napCajaFromText(text, strict) {
+  if (!text) return null;
+  const withoutPorts = String(text).replace(NAP_PORT_TEXT_RE, " ");
+  // En texto libre, si hay "(Puerto N)", la caja es el token inmediatamente anterior.
+  if (strict) {
+    const m = String(text).match(/([A-Za-z0-9][A-Za-z0-9._/-]*)[^A-Za-z0-9()]*\(\s*(?:port|puerto)\s*[:#.]?\s*\d+\s*\)/i);
+    if (m) return NAP_PLACEHOLDER_RE.test(m[1]) ? null : m[1];
+  }
+  const cleaned = withoutPorts
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/gu, "")
+    .trim();
+  if (!cleaned || /[()]/.test(cleaned)) return null;
+  if (strict && /\s/.test(cleaned)) return null;
+  if (cleaned.length > 40 || !NAP_CAJA_RE.test(cleaned) || NAP_PLACEHOLDER_RE.test(cleaned)) return null;
+  return cleaned;
+}
+
+// Interpreta lo que devolvió readNapDivisorBlock. Nunca inventa datos:
+//   - caja: texto limpio del <a> (o, sin <a>, fallback textual estricto);
+//     null si no se puede determinar con seguridad — jamás "D60B5 (Puerto 7)".
+//   - puerto: data-odb-port; si falta, "(Port N)"/"(Puerto N)" del texto.
+//     Si ambos existen y no coinciden, puerto = null y conflict = true.
+function resolveNapCajaPort(raw) {
+  const empty = { caja: null, puerto: null, source: null, portSource: null, conflict: false, odbId: null, raw: null };
+  if (!raw || !raw.found) return empty;
+
+  const hasAnchor = typeof raw.anchorText === "string";
+  const valueText = hasAnchor ? raw.anchorText : raw.text;
+  const caja = hasAnchor ? napCajaFromText(raw.anchorText, false) : napCajaFromText(raw.text, true);
+
+  const attrPort = positivePortOrNull(raw.portAttr);
+  const textPorts = napTextPorts(hasAnchor ? `${raw.anchorText} ${raw.text || ""}` : raw.text);
+
+  let puerto = null;
+  let portSource = null;
+  let conflict = false;
+  if (attrPort) {
+    if (textPorts.some((p) => p !== attrPort)) {
+      conflict = true;
+    } else {
+      puerto = attrPort;
+      portSource = "attribute";
+    }
+  } else if (textPorts.length === 1) {
+    puerto = textPorts[0];
+    portSource = "text";
+  } else if (textPorts.length > 1) {
+    conflict = true;
+  }
+
+  return {
+    caja,
+    puerto,
+    source: raw.source || null,
+    portSource,
+    conflict,
+    odbId: raw.odbId || null,
+    raw: valueText || null,
+  };
 }
 
 // ---------- Comparación óptica cliente vs promedio de caja ----------
@@ -2014,6 +2210,44 @@ const TAP_EASTER_EGG_DISPLAY_MS = 10000;
 // con notification.enabled generan una novedad pendiente.
 const CHANGELOG_ENTRIES = [
   {
+    version: "3.1.1",
+    changes: [
+      {
+        title: "🧩 Hotfix de compatibilidad con la vista de cliente",
+        text: "Corrección de la lectura de caja y puerto en la vista de cliente tras cambios recientes en la estructura HTML de SmartOLT.",
+      },
+      {
+        title: "🖼️ Elementos SVG en NAP (Divisor)",
+        text: "Adaptación a la incorporación de elementos visuales SVG en el bloque NAP (Divisor).",
+      },
+      {
+        title: "🔤 Puerto / Port",
+        text: "Compatibilidad con la nueva denominación Puerto, manteniendo compatibilidad con el formato anterior Port.",
+      },
+      {
+        title: "🔌 Puerto desde data-odb-port",
+        text: "Priorización del puerto informado mediante data-odb-port cuando está disponible.",
+      },
+      {
+        title: "🛡️ Validación de caja y puerto",
+        text: "Incorporación de validaciones para evitar interpretar datos incompletos o inconsistentes como una caja o puerto válido.",
+      },
+      {
+        title: "🔎 Extracción más robusta",
+        text: "Mejoras en la extracción de caja y puerto ante cambios de presentación de SmartOLT.",
+      },
+      {
+        title: "🧪 Pruebas de regresión",
+        text: "Incorporación de pruebas de regresión para detectar futuros cambios en la estructura de la vista de cliente.",
+      },
+      {
+        title: "⚙️ Estabilidad y compatibilidad",
+        text: "Mejoras generales de estabilidad y compatibilidad.",
+      },
+    ],
+    notifications: [],
+  },
+  {
     version: "3.1.0",
     changes: [
       {
@@ -2218,6 +2452,8 @@ const SmartOLTShared = {
   naturalCompare,
   isLosOrPowerFailStatus,
   parseCajaPortLabel,
+  readNapDivisorBlock,
+  resolveNapCajaPort,
   normalizeCajaName,
   buildDataIdentity,
   buildCajaAverages,

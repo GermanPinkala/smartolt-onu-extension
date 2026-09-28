@@ -477,42 +477,9 @@ function clickConfiguredExport() {
 
 // Lee la caja/NAP que SmartOLT está mostrando en la pestaña activa sin hacer
 // clicks ni consultas de red. En /onu/configured la fuente primaria es #odb;
-// en una ficha u otra vista compatible se usa la etiqueta NAP (Divisor).
+// en una ficha u otra vista compatible se usa el bloque NAP (Divisor), leído
+// con readNapFromTab — la MISMA extracción que usa la consulta de cliente.
 function readCurrentCajaContext() {
-  function norm(value) {
-    return String(value || "").replace(/\s+/g, " ").trim();
-  }
-
-  function textOf(element) {
-    return norm(element && element.textContent);
-  }
-
-  function valueNearLabel(element) {
-    const row = element.closest("tr");
-    if (row) {
-      const cells = Array.from(row.children);
-      const index = cells.indexOf(element);
-      for (let i = index + 1; i < cells.length; i++) {
-        const value = textOf(cells[i]);
-        if (value) return value;
-      }
-    }
-
-    const raw = textOf(element);
-    const inline = raw.match(/:\s*(.+)$/);
-    if (inline && inline[1]) return norm(inline[1]);
-
-    const sibling = element.nextElementSibling;
-    if (sibling && textOf(sibling)) return textOf(sibling);
-
-    const parent = element.parentElement;
-    if (parent && parent.children.length === 2) {
-      const other = Array.from(parent.children).find((child) => child !== element);
-      if (other && textOf(other)) return textOf(other);
-    }
-    return null;
-  }
-
   const select = document.getElementById("odb");
   if (select) {
     return {
@@ -521,20 +488,21 @@ function readCurrentCajaContext() {
       cajas: Array.from(select.selectedOptions).map((option) => option.textContent || ""),
     };
   }
-
-  const napLabelRe = /^nap\s*\(\s*divisor\s*\)$/i;
-  const elements = Array.from(document.querySelectorAll("th,td,dt,label,span,div,strong,b,p"));
-  for (const element of elements) {
-    const raw = textOf(element);
-    const inline = raw.match(/^nap\s*\(\s*divisor\s*\)\s*:\s*(.+)$/i);
-    if (inline && inline[1]) return { source: "nap", ready: true, cajas: [inline[1]] };
-    const label = raw.replace(/:\s*$/, "");
-    if (!napLabelRe.test(label)) continue;
-    const value = valueNearLabel(element);
-    if (value) return { source: "nap", ready: true, cajas: [value] };
-  }
-
   return { source: null, ready: false, cajas: [] };
+}
+
+// Única extracción del bloque NAP (Divisor) para toda la extensión: el lector
+// de DOM (SmartOLTShared.readNapDivisorBlock, autocontenido e inyectado en la
+// pestaña) y la interpretación pura (SmartOLTShared.resolveNapCajaPort).
+// Devuelve { found, caja, puerto, conflict, ... }; caja/puerto son null si no
+// se pueden determinar con seguridad.
+async function readNapFromTab(tabId) {
+  const result = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: SmartOLTShared.readNapDivisorBlock,
+  });
+  const raw = result && result[0] && result[0].result;
+  return Object.assign({ found: !!(raw && raw.found) }, SmartOLTShared.resolveNapCajaPort(raw));
 }
 
 async function getCurrentCajaContext(tab) {
@@ -557,6 +525,11 @@ async function getCurrentCajaContext(tab) {
             .map((caja) => SmartOLTShared.normalizeCajaName(caja))
             .filter(Boolean),
         };
+      }
+      const nap = await readNapFromTab(tab.id);
+      const napCaja = SmartOLTShared.normalizeCajaName(nap.caja);
+      if (napCaja) {
+        return { status: "identified", cajas: [napCaja] };
       }
     } catch (e) {
       // La página puede estar navegando o el DOM puede todavía no estar listo.
@@ -1452,9 +1425,9 @@ consultarCajasBtn.addEventListener("click", async () => {
 // adentro. Solo LEE el DOM ya renderizado por la propia SmartOLT (no hace
 // fetch, no llama ninguna API, no hace click en nada).
 //
-// Nombre, caja/NAP, puerto y serial se siguen buscando por el TEXTO de las
-// etiquetas (best-effort, sin depender de clases/IDs específicos, ya que no
-// hay una muestra completa del HTML real de la ficha). La potencia óptica del
+// Nombre, serial y Zona se siguen buscando por el TEXTO de las etiquetas
+// (best-effort, sin depender de clases/IDs específicos). Caja/NAP y puerto
+// NO se leen acá: salen de readNapFromTab (ver handleObtenerCliente). La potencia óptica del
 // cliente, en cambio, SÍ tiene un selector real confirmado: #signal_wrapper,
 // con el formato "-21.42 dBm / -25.09 dBm" (izquierda = ONU, derecha = OLT).
 // Como ese elemento se actualiza dinámicamente, se reintenta brevemente antes
@@ -1471,9 +1444,8 @@ function injectedExtractClientData() {
   // Dado un elemento ya identificado como "la etiqueta", busca su valor
   // asociado probando, en orden, los patrones de layout más comunes en
   // SmartOLT (fila de tabla, lista de definición, "Etiqueta: Valor" inline,
-  // hermano siguiente, contenedor de dos hijos). Reutilizada tanto por la
-  // búsqueda genérica por lista de etiquetas como por la búsqueda específica
-  // de "NAP (Divisor)" (que necesita su propio matcher por regex, ver abajo).
+  // hermano siguiente, contenedor de dos hijos). Usada por la búsqueda
+  // genérica por lista de etiquetas (findValueByLabels).
   function valueNearLabelElement(el, lower) {
     // Fila de tabla: <tr><th>Label</th><td>Valor</td></tr>
     const tr = el.closest("tr");
@@ -1547,15 +1519,6 @@ function injectedExtractClientData() {
     return findValueByMatch((lower) => normalizedLabels.some((l) => lower === l || lower === l + ":"));
   }
 
-  // Etiqueta "NAP (Divisor)" específicamente (ej. "NAP (Divisor): D1FA1 (Port 6)").
-  // Se usa un regex tolerante a espacios extra alrededor de los paréntesis
-  // ("NAP(Divisor)", "NAP ( Divisor )", etc.) en lugar de una lista de strings
-  // exactos, para no depender de un formato de espaciado específico.
-  const NAP_DIVISOR_LABEL_RE = /^nap\s*\(\s*divisor\s*\)$/i;
-  function findNapDivisorValue() {
-    return findValueByMatch((lower) => NAP_DIVISOR_LABEL_RE.test(lower));
-  }
-
   function findNumber(value) {
     if (!value) return null;
     const m = String(value).match(/-?\d+(?:[.,]\d+)?/);
@@ -1606,12 +1569,10 @@ function injectedExtractClientData() {
   const name = findClientName();
   // IMPORTANTE: el puerto de la caja/NAP NUNCA debe salir del campo general
   // "Puerto" de la ficha (ese es otro dato — el puerto físico de la ONU en la
-  // placa, no el puerto de la caja/NAP). La única fuente válida es el propio
-  // texto de la etiqueta "NAP (Divisor)" (ej. "D1FA1 (Port 6)"), que trae caja
-  // y puerto juntos — se separan más abajo, fuera de esta función inyectada,
-  // con SmartOLTShared.parseCajaPortLabel. Por eso acá NO se busca ningún
-  // campo "Puerto" por separado.
-  const caja = findNapDivisorValue();
+  // placa, no el puerto de la caja/NAP). Caja y puerto salen SOLO del bloque
+  // "NAP (Divisor)", que se lee aparte con readNapFromTab (la misma extracción
+  // que usa readCurrentCajaContext). Por eso acá no se busca ni la caja ni
+  // ningún campo "Puerto".
   const serial = findValueByLabels(["SN", "Serial", "Serial Number", "S/N"]);
   // SmartOLT muestra el nombre operativo de la OLT (p. ej. "5 - OLT-D")
   // separado de la Zona (p. ej. "OBE-OLT-D"). La Zona es el identificador
@@ -1635,9 +1596,8 @@ function injectedExtractClientData() {
 
     return {
       name: name || null,
-      caja: caja || null,
-      // El puerto se completa después, fuera de esta función inyectada, a
-      // partir de "caja" (que puede traer "D1FA1 (Port 6)") — nunca acá.
+      // Caja y puerto se completan después con readNapFromTab — nunca acá.
+      caja: null,
       puerto: null,
       serial: serial || null,
       oltName: oltName || null,
@@ -1683,23 +1643,26 @@ async function handleObtenerCliente() {
   }
 
   const clientData = injectionResults && injectionResults[0] && injectionResults[0].result;
+
+  // Caja y puerto del bloque NAP (Divisor) — misma extracción que
+  // readCurrentCajaContext. El puerto sale de data-odb-port o, como respaldo,
+  // de "(Port N)"/"(Puerto N)"; nunca del campo general "Puerto" de la ficha.
+  // Si no se pueden determinar con seguridad (o el atributo y el texto no
+  // coinciden), quedan null y el informe lo muestra sin inventar nada.
+  let nap = null;
+  try {
+    nap = await readNapFromTab(tab.id);
+  } catch (e) {
+    nap = null;
+  }
+  if (clientData) {
+    clientData.caja = (nap && nap.caja) || null;
+    clientData.puerto = clientData.caja && nap ? nap.puerto : null;
+  }
+
   if (!clientData || (!clientData.name && !clientData.caja && !clientData.serial)) {
     clienteFeedback.textContent = "⚠️ No se pudieron detectar los datos del cliente en esta página.";
     return;
-  }
-
-  // SmartOLT muestra la caja/NAP como "A47B1 (Port 8)": separar el nombre real
-  // de la caja del puerto ANTES de comparar contra las cajas del CSV (si no,
-  // "A47B1 (Port 8)" nunca va a coincidir con "A47B1"). El puerto SIEMPRE sale
-  // de acá — nunca del campo general "Puerto" de la ficha, que ya no se lee en
-  // ningún lado — y si el texto no trae "(Port N)", el puerto queda null y el
-  // informe lo muestra como "no disponible" (sin inventar nada).
-  if (clientData.caja) {
-    const parsedCaja = SmartOLTShared.parseCajaPortLabel(clientData.caja);
-    clientData.caja = parsedCaja.caja;
-    clientData.puerto = parsedCaja.puerto;
-  } else {
-    clientData.puerto = null;
   }
 
   const freshness = validateClientCajaAgainstData(clientData.caja);

@@ -1,0 +1,11 @@
+{
+  "name": "smartolt-onu-extension-tests",
+  "private": true,
+  "description": "Tests de regresión (solo desarrollo; no forma parte del paquete de la extensión).",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.0"
+  }
+}

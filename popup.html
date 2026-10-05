@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<title>SmartOLT — Control de ONUs</title>
+<link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <!-- Capa de perfiles (v4): profile.js decide cuál de estas vistas se
+       muestra según el perfil guardado en chrome.storage.local. Todas arrancan
+       ocultas hasta que se lee el perfil. -->
+  <div id="profileSelectView" class="profile-view" hidden>
+    <header class="app-header">
+      <h1>SmartOLT — Control</h1>
+      <p class="subtitle">Seleccioná tu perfil</p>
+    </header>
+    <main class="profile-main">
+      <button class="btn btn-primary profile-option" type="button" data-profile="cct">🛠️ CCT</button>
+      <button class="btn btn-primary profile-option" type="button" data-profile="callcenter">📞 CALL CENTER</button>
+      <button id="profileCancelBtn" class="btn btn-ghost" type="button" hidden>Cancelar</button>
+    </main>
+  </div>
+
+  <!-- Vista principal, compartida por CCT y CALL CENTER: interfaz de v3.1.1
+       (popup.js) + dashboards. profile.js la muestra con el perfil guardado,
+       carga los scripts de ese perfil y marca <body data-profile="...">; los
+       elementos .profile-cct / .profile-callcenter solo se ven con su perfil
+       (ver popup.css). -->
+  <div id="appView" class="profile-view" hidden>
+  <header class="app-header">
+    <h1>SmartOLT — Control de ONUs</h1>
+    <p class="subtitle" id="subtitle">Estado del último CSV capturado</p>
+  </header>
+
+  <div class="profile-bar">
+    <span id="profileBarLabel">Perfil:</span>
+    <button class="profile-bar-btn js-change-profile" type="button">⚙️ Cambiar perfil</button>
+  </div>
+
+  <main>
+    <!-- Pantalla principal: pasiva, solo refleja el estado guardado (nunca dispara nada al abrir) -->
+    <section id="homeScreen" class="screen">
+
+      <section id="notificationBox" class="notification-box" hidden aria-live="polite">
+        <div class="notification-header">
+          <p id="notificationSummary" class="notification-summary"></p>
+          <div class="notification-actions">
+            <button id="notificationDetailBtn" class="notification-icon-btn" type="button" hidden aria-label="Ver detalle de la novedad" title="Ver detalle">👁</button>
+            <button id="notificationCloseBtn" class="notification-icon-btn" type="button" hidden aria-label="Cerrar aviso">✕</button>
+          </div>
+        </div>
+        <pre id="notificationDetail" class="notification-detail" hidden></pre>
+        <button id="notificationAcknowledgeBtn" class="btn btn-secondary notification-acknowledge" type="button" hidden>Entendido</button>
+      </section>
+
+      <!-- Aviso: la última captura superó el límite de seguridad. No reemplaza
+           los datos válidos anteriores ni oculta los controles. -->
+      <div id="overLimitBox" class="error-box" hidden>
+        <div class="notification-header">
+          <p id="overLimitText"></p>
+          <button id="overLimitCloseBtn" class="notification-icon-btn" type="button" aria-label="Cerrar aviso">✕</button>
+        </div>
+        <p id="overLimitHint" class="hint-msg"></p>
+      </div>
+
+      <!-- Aviso: la última captura automática falló. Mismo criterio. -->
+      <div id="captureFailedBox" class="error-box" hidden>
+        <div class="notification-header">
+          <p>⚠️ No se pudo capturar automáticamente el último CSV exportado.</p>
+          <button id="captureFailedCloseBtn" class="notification-icon-btn" type="button" aria-label="Cerrar aviso">✕</button>
+        </div>
+        <p id="captureFailedHint" class="hint-msg"></p>
+      </div>
+
+      <!-- Estado: home. Los botones siempre están visibles/alcanzables acá,
+           exista o no un CSV capturado (v3.0.8) — lo único que cambia según
+           haya o no CSV son las estadísticas compactas (se ocultan sin CSV,
+           no hay nada que mostrar), y si
+           "ESTADO DE CAJAS"/"Descargar último CSV" están habilitados (dependen
+           del CSV) — "OBTENER DATOS DEL CLIENTE" es independiente y se
+           habilita/deshabilita solo según la pestaña activa (ver
+           refreshClienteBtnState en popup.js). -->
+      <div id="capturedBox" class="captured-box" hidden>
+        <!-- Dashboard de cliente (v4, CCT y CALL CENTER): solo visible con una
+             ficha de cliente (/onu/view/ID) activa. Lo maneja dashboard.js; es
+             solo de consulta y nunca se agrega al informe para el técnico. -->
+        <section id="clientDashboard" class="client-dashboard" hidden aria-live="polite">
+          <div class="cd-header">
+            <span id="cdStatus" class="cd-status">Leyendo ficha…</span>
+            <span id="cdSince" class="cd-since"></span>
+            <button id="cdRefreshBtn" class="notification-icon-btn cd-refresh" type="button" title="Actualizar estado y señal" aria-label="Actualizar estado y señal">↻</button>
+          </div>
+          <div class="cd-optics">
+            <div class="cd-metric"><span class="cd-label">ONU</span><strong id="cdOnu">—</strong><span id="cdOnuDelta" class="cd-delta"></span></div>
+            <div class="cd-metric"><span class="cd-label">OLT</span><strong id="cdOlt">—</strong><span id="cdOltDelta" class="cd-delta"></span></div>
+            <div class="cd-metric"><span class="cd-label">Condición</span><strong id="cdVerdict">—</strong><span id="cdVerdictLabel" class="cd-delta"></span></div>
+          </div>
+          <p id="cdAverage" class="cd-line"></p>
+          <p id="cdCaja" class="cd-line"></p>
+          <p id="cdNetwork" class="cd-line"></p>
+          <div id="cdAlerts" class="cd-alerts" hidden></div>
+          <!-- Diagnóstico de CALL CENTER (cc-dashboard.js): historial de 24 hs,
+               cortes y afectación de la caja. Solo con ese perfil. -->
+          <div id="ccClientSection" class="cc-section profile-callcenter" hidden></div>
+        </section>
+
+        <!-- Dashboard de caja (v4, CCT y CALL CENTER): estado por defecto fuera de una ficha
+             de cliente. Las cajas del CSV capturado como bloques desplegables (una caja abierta a la
+             vez) y, dentro, los clientes con problemas en categorías
+             desplegables (una abierta a la vez). Avisa si la caja de la página
+             no está en el CSV. Lo maneja dashboard.js. -->
+        <section id="boxDashboard" class="client-dashboard box-dashboard" hidden aria-live="polite"></section>
+
+         <p id="csvCapturedBadge" class="query-status-badge" hidden>✓ CSV capturado</p>
+
+        <div id="compactStats" class="compact-stats">
+          <span class="stat-chip"><strong id="sumTotal">0</strong> ONUs</span>
+          <span id="losPowerFailChip" class="stat-chip" hidden></span>
+          <span class="stat-chip">🟢 <strong id="sumOnline">0</strong> Online</span>
+        </div>
+
+        <p id="cajaNames" class="caja-names"></p>
+
+        <button id="updateDataBtn" class="btn btn-primary" disabled title="Abrí /onu/configured en SmartOLT para actualizar los datos.">🔄 Actualizar datos</button>
+        <p id="updateStatus" class="update-status" hidden></p>
+        <!-- Botones de cada perfil: solo se ven con su perfil activo. -->
+        <button id="consultarCajasBtn" class="btn btn-secondary profile-cct">🔎 ESTADO DE CAJAS</button>
+        <button id="obtenerClienteBtn" class="btn btn-client-disabled profile-cct" disabled title="Abrí la ficha de un cliente en SmartOLT (.../onu/view/ID) para usar este botón.">📋 GENERAR INFORME</button>
+        <button id="ccBoxReportBtn" class="btn btn-secondary profile-callcenter" disabled title="Este botón necesita un CSV exportado desde SmartOLT.">📦 INFORME DE CAJAS</button>
+        <button id="ccObservationBtn" class="btn btn-client-disabled profile-callcenter" disabled title="Abrí la ficha de un cliente en SmartOLT (.../onu/view/ID) para usar este botón.">📋 GENERAR OBSERVACIÓN</button>
+
+        <section class="generated-preview" aria-labelledby="generatedPreviewLabel">
+          <button id="generatedPreviewToggle" class="generated-preview-toggle" type="button" aria-expanded="false" aria-controls="generatedTextPreview">
+            <span id="generatedPreviewLabel">Texto generado</span>
+            <span id="generatedPreviewIcon" aria-hidden="true">▼</span>
+          </button>
+          <textarea id="generatedTextPreview" readonly hidden placeholder="El resultado copiado aparecerá aquí."></textarea>
+        </section>
+
+        <button id="downloadCsvBtn" class="btn btn-ghost">📥 Descargar último CSV</button>
+
+        <p id="copyFeedback" class="copy-feedback" hidden>✓ Copiado</p>
+        <p id="clienteFeedback" class="copy-feedback" hidden></p>
+        <p id="compatibilityWarning" class="compatibility-warning" hidden></p>
+        <p id="csvFeedback" class="copy-feedback" hidden></p>
+      </div>
+
+      <!-- Funciones manuales: respaldo, no protagonistas -->
+      <details class="manual-options">
+        <summary>Opciones manuales</summary>
+        <div class="manual-options-body">
+          <div id="manualLoadingMsg" class="loading-msg" hidden></div>
+          <button id="selectBtn" class="btn btn-secondary">📄 Procesar otro CSV</button>
+          <input type="file" id="fileInput" accept=".csv,text/csv" hidden />
+          <button id="autoDetectBtn" class="btn btn-secondary">🔎 Detectar último CSV descargado</button>
+          <p id="hintMsg" class="hint-msg" hidden></p>
+        </div>
+      </details>
+    </section>
+
+    <!-- Pantalla de error: solo para fallas al procesar un CSV cargado manualmente -->
+    <section id="errorScreen" class="screen" hidden>
+      <div class="error-box">
+        <p id="errorText">⚠️ No se pudo identificar la estructura del archivo de SmartOLT.</p>
+        <ul id="errorDetails" class="error-details"></ul>
+      </div>
+      <button id="backToHomeBtn" class="btn btn-secondary">🔄 Volver</button>
+    </section>
+
+    <section id="changelogScreen" class="screen" hidden>
+      <div class="changelog-box">
+        <h2>Historial de versiones</h2>
+        <div id="changelogContent"></div>
+      </div>
+      <button id="backFromChangelogBtn" class="btn btn-secondary" type="button">🔄 Volver</button>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    <span>🔒 Procesamiento 100% local — no se envía información a ningún servidor</span>
+    <div id="teamSignature" class="team-signature" role="button" tabindex="0" aria-label="Firma del equipo">
+      <span id="teamSignatureLine1"></span>
+      <span id="versionChangelogLink" class="version-changelog-link" role="button" tabindex="0" aria-label="Abrir historial de versiones"></span>
+      <span id="teamSignatureCreatedBy"></span>
+      <span id="teamSignatureLine2" class="team-signature-line2" hidden></span>
+    </div>
+  </footer>
+  </div>
+
+  <script src="shared.js"></script>
+  <!-- popup.js, dashboard.js y los scripts de cada perfil los inyecta
+       profile.js según el perfil activo. -->
+  <script src="profile.js"></script>
+</body>
+</html>

@@ -1590,9 +1590,13 @@ function injectedExtractClientData() {
   // ningún campo "Puerto".
   const serial = findValueByLabels(["SN", "Serial", "Serial Number", "S/N"]);
   // SmartOLT muestra el nombre operativo de la OLT (p. ej. "5 - OLT-D")
-  // separado de la Zona (p. ej. "OBE-OLT-D"). La Zona es el identificador
-  // estable utilizado por la tabla de compatibilidad.
+  // separado de la Zona (p. ej. "OBE-OLT-D").
   const oltName = findValueByLabels(["Zona", "Zone"]);
+  // ID real de la OLT para la compatibilidad ONU/OLT: atributo data-olt-id del
+  // enlace "mover ONU" (a.move-onu, el mismo que lee el dashboard). Solo se lee
+  // ese atributo; sin enlace queda null (OLT no identificada).
+  const moveOnuLink = document.querySelector('a.move-onu[data-show-olt="1"]') || document.querySelector("a.move-onu");
+  const oltIdRaw = moveOnuLink ? String(moveOnuLink.getAttribute("data-olt-id") || "").trim() : "";
 
   return waitForSignalWrapper(10, 200).then((signal) => {
     let sig1490 = null;
@@ -1615,6 +1619,7 @@ function injectedExtractClientData() {
       caja: null,
       puerto: null,
       serial: serial || null,
+      oltId: oltIdRaw || null,
       oltName: oltName || null,
       sig1490,
       sig1310,

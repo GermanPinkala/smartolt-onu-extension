@@ -1,15 +1,19 @@
 "use strict";
 
 // Aviso visual de compatibilidad ONU/OLT en la ficha /onu/view/<id>.
-// Solo lee el DOM (SN y Zona) y reutiliza la lógica de SmartOLTShared; no
-// modifica datos, enlaces ni botones de SmartOLT.
+// Solo lee el DOM (SN y el data-olt-id del enlace "mover ONU") y reutiliza la
+// lógica de SmartOLTShared; no modifica datos, enlaces ni botones de SmartOLT.
 
 const ONU_VIEW_WARNING_ATTRIBUTE = "data-smartolt-onu-view-compatibility-warning";
-const ONU_VIEW_WARNING_SHORT_TEXT = "⚠️ No compatible";
+// Marca corta por estado (el texto completo queda como tooltip).
+const ONU_VIEW_WARNING_SHORT_TEXTS = {
+  [SmartOLTShared.ONU_COMPATIBILITY_STATUS.INCOMPATIBLE]: "⚠️ No compatible",
+  [SmartOLTShared.ONU_COMPATIBILITY_STATUS.UNKNOWN_ONU]: "⚠️ ONU desconocida",
+};
 const ONU_VIEW_SCAN_DELAY_MS = 250;
 let onuViewScanTimer = null;
 // Aviso propio presente durante el escaneo actual; su texto se excluye al leer
-// valores para que el SN leído no incluya "⚠️ No compatible".
+// valores para que el SN leído no incluya la marca (p. ej. "⚠️ No compatible").
 let currentWarningElement = null;
 
 function normText(s) {
@@ -88,21 +92,25 @@ function findLabelByNames(labels) {
   return null;
 }
 
-// Solo se avisa si el serial tiene un prefijo conocido (HWTC/ZTEG); la
-// evaluación en sí es la misma de SmartOLTShared.
-function hasKnownSerialPrefix(serial) {
-  const normalized = String(serial || "").trim().toUpperCase();
-  return Object.values(SmartOLTShared.ONU_COMPATIBILITY_PREFIXES)
-    .some((prefix) => normalized.startsWith(prefix));
+// ID real de la OLT: data-olt-id del enlace "mover ONU" (mismo selector que el
+// dashboard del popup). null si la ficha no lo trae (OLT no identificada).
+function readOltId() {
+  const link = document.querySelector('a.move-onu[data-show-olt="1"]') || document.querySelector("a.move-onu");
+  const id = link ? String(link.getAttribute("data-olt-id") || "").trim() : "";
+  return id || null;
 }
 
 function getOnuViewWarning() {
   const serial = findLabelByNames(["SN", "Serial", "Serial Number", "S/N"]);
-  const zone = findLabelByNames(["Zona", "Zone"]);
-  if (!serial || !zone || !hasKnownSerialPrefix(serial.value)) return null;
+  if (!serial) return null;
 
-  const warning = SmartOLTShared.getOnuOltCompatibilityWarning(zone.value, serial.value);
-  return warning ? { text: warning, serialElement: serial.element } : null;
+  const result = SmartOLTShared.evaluateOnuOltCompatibility(readOltId(), serial.value);
+  if (!result.warning) return null;
+  return {
+    text: result.warning,
+    shortText: ONU_VIEW_WARNING_SHORT_TEXTS[result.status] || result.warning,
+    serialElement: serial.element,
+  };
 }
 
 function updateOnuViewWarning() {
@@ -115,13 +123,17 @@ function updateOnuViewWarning() {
     if (existing) existing.remove();
     return;
   }
-  if (existing) return;
+  // Una sola marca: si ya está la misma no se toca; si cambió el caso, se reemplaza.
+  if (existing) {
+    if (existing.textContent === warning.shortText) return;
+    existing.remove();
+  }
 
   // Marca corta junto al valor del SN; el texto completo queda como tooltip.
   const warningElement = document.createElement("span");
   warningElement.setAttribute(ONU_VIEW_WARNING_ATTRIBUTE, "");
   warningElement.setAttribute("title", warning.text.replace(/^\s*⚠️\s*/, ""));
-  warningElement.textContent = ONU_VIEW_WARNING_SHORT_TEXT;
+  warningElement.textContent = warning.shortText;
   warning.serialElement.appendChild(warningElement);
 }
 

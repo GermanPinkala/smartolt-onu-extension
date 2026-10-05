@@ -4,35 +4,23 @@ const UNCONFIGURED_ROOT_ID = "existingUnconfiguredOnus";
 const WARNING_ATTRIBUTE = "data-smartolt-onu-compatibility-warning";
 let scanScheduled = false;
 
-const HUAWEI_ONU_PREFIX = SmartOLTShared.ONU_COMPATIBILITY_PREFIXES.huawei;
-const ZTE_ONU_PREFIX = SmartOLTShared.ONU_COMPATIBILITY_PREFIXES.zte;
-
-// Tabla oficial de /onu/unconfigured: ID de OLT (parámetro olt del enlace
-// "Autorizar") -> prefijo de serial esperado. Los IDs ausentes no se evalúan.
-const UNCONFIGURED_OLT_COMPATIBILITY = {
-  "2": HUAWEI_ONU_PREFIX, // OLT-E
-  "3": HUAWEI_ONU_PREFIX, // OLT-C
-  "4": HUAWEI_ONU_PREFIX, // OLT-A
-  "5": HUAWEI_ONU_PREFIX, // OLT-D
-  "6": HUAWEI_ONU_PREFIX, // OLT-B
-  "7": HUAWEI_ONU_PREFIX, // OLT-A-PZA
-  "8": HUAWEI_ONU_PREFIX, // OLT-A-WND
-  "10": HUAWEI_ONU_PREFIX, // OLT-F-VBN
-  "11": HUAWEI_ONU_PREFIX, // OLT-G-MRT
-  "12": HUAWEI_ONU_PREFIX, // OLT-C-PAZ
-  "13": HUAWEI_ONU_PREFIX, // OLT-D-ADH
-  "15": ZTE_ONU_PREFIX, // OLT-A-ITU
-  "16": ZTE_ONU_PREFIX, // OLT-A-ELD
+// Marca corta por estado, igual que en la ficha (onu-view.js); el texto
+// completo queda como tooltip.
+const UNCONFIGURED_WARNING_SHORT_TEXTS = {
+  [SmartOLTShared.ONU_COMPATIBILITY_STATUS.INCOMPATIBLE]: "⚠️ No compatible",
+  [SmartOLTShared.ONU_COMPATIBILITY_STATUS.UNKNOWN_ONU]: "⚠️ ONU desconocida",
 };
 
+// ID de OLT (parámetro olt del enlace "Autorizar") + serial (parámetro sn),
+// evaluados con la matriz oficial única de SmartOLTShared. Devuelve
+// { text, shortText } o null si no hay nada que avisar.
 function getUnconfiguredCompatibilityWarning(oltId, serial) {
-  const expectedPrefix = UNCONFIGURED_OLT_COMPATIBILITY[String(oltId || "").trim()];
-  const normalizedSerial = String(serial || "").trim().toUpperCase();
-  if (!expectedPrefix || !normalizedSerial) return null;
-
-  return normalizedSerial.startsWith(expectedPrefix)
-    ? null
-    : SmartOLTShared.ONU_OLT_COMPATIBILITY_WARNING;
+  const result = SmartOLTShared.evaluateOnuOltCompatibility(oltId, serial);
+  if (!result.warning) return null;
+  return {
+    text: result.warning,
+    shortText: UNCONFIGURED_WARNING_SHORT_TEXTS[result.status] || result.warning,
+  };
 }
 
 function getAuthorizationData(link) {
@@ -66,11 +54,16 @@ function updateWarning(row, actionLink) {
     return;
   }
 
-  if (existingWarning) return;
+  // Un solo aviso por fila: si ya está el mismo no se toca; si cambió, se reemplaza.
+  if (existingWarning) {
+    if (existingWarning.textContent === warning.shortText) return;
+    existingWarning.remove();
+  }
 
   const warningElement = document.createElement("span");
   warningElement.setAttribute(WARNING_ATTRIBUTE, "");
-  warningElement.textContent = warning;
+  warningElement.setAttribute("title", warning.text.replace(/^\s*⚠️\s*/, ""));
+  warningElement.textContent = warning.shortText;
   actionCell.appendChild(warningElement);
 }
 

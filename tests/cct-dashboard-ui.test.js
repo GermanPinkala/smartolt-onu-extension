@@ -6,7 +6,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { row, HEALTHY, CONFIGURED_URL, CONFIGURED_PAGE, FICHA, openPopup } = require("./popup-harness");
+const { row, HEALTHY, CONFIGURED_URL, CONFIGURED_PAGE, fichaHtml, FICHA, openPopup } = require("./popup-harness");
 
 // Filas de otra caja con distintos problemas.
 const D1DB1 = [
@@ -208,6 +208,72 @@ test("17. ficha de cliente: dashboard individual, SIN contadores generales ni da
   assert.equal(p.w.getComputedStyle(p.$("compactStats")).display, "none");
   assert.equal(p.$("cdOnu").textContent, "-20.50 dBm");
   assert.deepEqual(p.calls.statusFetchWorlds, ["MAIN"]);
+  p.close();
+});
+
+// ---------- Diferencia con el promedio: "X.XX dB mejor/peor que prom." ----------
+// Promedio de HEALTHY (3 mejores): ONU -20.10 / OLT -23.03 (-23.0333…).
+
+async function clientDeltas(signal) {
+  const p = await openPopup({ tabUrl: "https://demo.smartolt.com/onu/view/7", pageHtml: fichaHtml({ signal }), csvRows: HEALTHY });
+  assert.deepEqual(p.errors, []);
+  const out = {
+    onu: p.$("cdOnu").textContent,
+    olt: p.$("cdOlt").textContent,
+    onuDelta: p.$("cdOnuDelta").textContent,
+    oltDelta: p.$("cdOltDelta").textContent,
+    onuLevel: p.$("cdOnuDelta").dataset.level,
+    oltLevel: p.$("cdOltDelta").dataset.level,
+    verdict: p.$("cdVerdict").textContent,
+    average: p.$("cdAverage").textContent,
+  };
+  p.close();
+  return out;
+}
+
+test("diferencia peor que el promedio: sin signo, 'X.XX dB peor que prom.'; valores y condición iguales", async () => {
+  const d = await clientDeltas("-20.50 dBm / -23.40 dBm (1500m)");
+  assert.equal(d.onu, "-20.50 dBm");
+  assert.equal(d.olt, "-23.40 dBm");
+  assert.equal(d.onuDelta, "0.40 dB peor que prom.");
+  assert.equal(d.oltDelta, "0.37 dB peor que prom.");
+  assert.equal(d.average, "Prom. caja: ONU -20.10 · OLT -23.03");
+  assert.equal(d.verdict, "✅");
+  assert.deepEqual([d.onuLevel, d.oltLevel], ["ok", "ok"]);
+});
+
+test("diferencia mejor que el promedio: 'X.XX dB mejor que prom.'", async () => {
+  const d = await clientDeltas("-19.00 dBm / -22.00 dBm (1500m)");
+  assert.equal(d.onuDelta, "1.10 dB mejor que prom.");
+  assert.equal(d.oltDelta, "1.03 dB mejor que prom.");
+  assert.equal(d.verdict, "✅");
+});
+
+test("diferencia casi nula: 'X.XX dB vs prom.' sin dirección", async () => {
+  const d = await clientDeltas("-20.12 dBm / -23.05 dBm (1500m)");
+  assert.equal(d.onuDelta, "0.02 dB vs prom.");
+  assert.equal(d.oltDelta, "0.02 dB vs prom.");
+  assert.ok(!/[+−-]/.test(d.onuDelta + d.oltDelta));
+});
+
+test("fuera de margen: solo cambia el texto; ❌ y nivel 'bad' como antes", async () => {
+  const d = await clientDeltas("-22.00 dBm / -25.00 dBm (1500m)");
+  assert.equal(d.onuDelta, "1.90 dB peor que prom.");
+  assert.equal(d.oltDelta, "1.97 dB peor que prom.");
+  assert.equal(d.verdict, "❌");
+  assert.deepEqual([d.onuLevel, d.oltLevel], ["bad", "bad"]);
+});
+
+test("formatAverageDifference: ejemplos reales y límites del tramo neutro", async () => {
+  const p = await openPopup({ tabUrl: "https://demo.smartolt.com/onu/view/7", pageHtml: FICHA, csvRows: HEALTHY });
+  const f = p.w.formatAverageDifference;
+  assert.equal(f(-24.56, -22.22), "2.34 dB peor que prom.");
+  assert.equal(f(-26.99, -24.46), "2.53 dB peor que prom.");
+  assert.equal(f(-20.0, -22.34), "2.34 dB mejor que prom.");
+  assert.equal(f(-20.1, -20.1), "0.00 dB vs prom.");
+  assert.equal(f(-20.14, -20.1), "0.04 dB vs prom.");
+  assert.equal(f(-20.15, -20.1), "0.05 dB peor que prom.");
+  assert.equal(f(-20.05, -20.1), "0.05 dB mejor que prom.");
   p.close();
 });
 

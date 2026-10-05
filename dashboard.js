@@ -174,13 +174,25 @@ function setLine(el, segments) {
   });
 }
 
+// Por debajo de esta diferencia (en dB) se muestra sin dirección: "0.02 dB vs prom.".
+const AVERAGE_DIFF_NEUTRAL_DB = 0.05;
+
+// Texto de la diferencia con el promedio, sin signo: la dirección se dice con
+// palabras. Mismo criterio de siempre: un valor menos negativo que el
+// promedio (cliente − promedio > 0) es MEJOR; más negativo, PEOR.
+function formatAverageDifference(clientValue, cajaAvg) {
+  const signed = Math.round((clientValue - cajaAvg) * 100) / 100;
+  const amount = `${Math.abs(signed).toFixed(2)} dB`;
+  if (Math.abs(signed) < AVERAGE_DIFF_NEUTRAL_DB) return `${amount} vs prom.`;
+  return `${amount} ${signed > 0 ? "mejor" : "peor"} que prom.`;
+}
+
 // Diferencia con el promedio de la caja y nivel visual, a partir de la misma
 // clasificación que usa el feedback del informe (classifyOpFeedback).
 function describeSide(clientValue, cajaAvg, approved, acceptedByCheck3) {
   const data = SmartOLTShared.getOpFeedbackData(clientValue, cajaAvg);
   if (!data) return { text: "", level: null };
-  const signed = Math.round((clientValue - cajaAvg) * 100) / 100;
-  const text = `${signed >= 0 ? "+" : "−"}${Math.abs(signed).toFixed(2)} vs prom.`;
+  const text = formatAverageDifference(clientValue, cajaAvg);
   if (acceptedByCheck3) return { text, level: "near", title: "Aprobado por Check 3" };
   const F = SmartOLTShared.OP_FEEDBACK;
   const category = SmartOLTShared.classifyOpFeedback(approved, data);

@@ -54,76 +54,79 @@ const COLUMN_ALIASES = {
 
 const TOP_N_SIGNAL = 3;
 
-// OLTs cuya familia puede determinarse con seguridad para comparar el prefijo
-// del serial de la ONU. Los nombres no incluidos no generan ningún aviso.
-const OLT_COMPATIBILITY_GROUPS = {
-  huawei: [
-    "ADH-OLT-D",
-    "MRT-OLT-G",
-    "OBE-OLT-A",
-    "OBE-OLT-B",
-    "OBE-OLT-C",
-    "OBE-OLT-D",
-    "PAZ-OLT-C",
-    "PZA-OLT-A",
-    "SNM-OLT-E",
-    "WND-OLT-A",
-  ],
-  zte: ["ELD-OLT-A", "ITU-OLT-A"],
-};
-
+// ---------- Compatibilidad ONU ↔ OLT (fuente única, matriz oficial de NOC) ----------
+// Familias de serial conocidas (prefijo del SN de la ONU).
 const ONU_COMPATIBILITY_PREFIXES = {
   huawei: "HWTC",
   zte: "ZTEG",
 };
 
+// Matriz oficial informada por NOC: ID de OLT en SmartOLT -> prefijos de
+// serial compatibles. Se identifica la OLT SOLO por su ID real (nunca por la
+// Zona ni por el nombre mostrado). Un ID que no está acá es una OLT no
+// contemplada: no se afirma compatibilidad ni incompatibilidad.
+// La usan el informe del cliente (buildClientReport), la ficha /onu/view
+// (onu-view.js) y /onu/unconfigured (unconfigured.js).
+const OLT_COMPATIBLE_ONU_PREFIXES = {
+  "2": ["HWTC"], // OLT-E
+  "3": ["HWTC"], // OLT-C
+  "4": ["HWTC"], // OLT-A
+  "5": ["HWTC"], // OLT-D
+  "6": ["HWTC"], // OLT-B
+  "7": ["HWTC"], // OLT-A-PZA
+  "8": ["HWTC"], // OLT-A-WND
+  "9": ["HWTC", "ZTEG"], // OLT-A-SPD
+  "10": ["HWTC"], // OLT-F-VBN
+  "11": ["HWTC"], // OLT-G-MRT
+  "12": ["HWTC", "ZTEG"], // OLT-C-PAZ
+  "13": ["HWTC", "ZTEG"], // OLT-D-ADH
+  "15": ["HWTC", "ZTEG"], // OLT-A-ITU
+  "16": ["HWTC", "ZTEG"], // OLT-A-ELD
+};
+
+// SABEMOS que no es compatible (familia conocida, OLT contemplada).
 const ONU_OLT_COMPATIBILITY_WARNING = "⚠️ ONU con serial no compatible con la OLT";
+// NO SABEMOS si es compatible (familia de serial desconocida). Nunca dice
+// "no compatible".
+const ONU_UNKNOWN_TYPE_WARNING =
+  "⚠️ ONU de tipo desconocido: no se dispone de información de compatibilidad para este serial.";
 
-// Solo se incluyen IDs confirmados en SmartOLT. Los demás pueden resolverse
-// desde select#olt cuando la página expone un nombre reconocido.
-const SMARTOLT_OLT_ID_MAP = {
-  "13": "ADH-OLT-D",
-  "15": "ITU-OLT-A",
-  "16": "ELD-OLT-A",
+const ONU_COMPATIBILITY_STATUS = {
+  NO_SERIAL: "no_serial",
+  UNKNOWN_ONU: "unknown_onu",
+  UNKNOWN_OLT: "unknown_olt",
+  COMPATIBLE: "compatible",
+  INCOMPATIBLE: "incompatible",
 };
 
-// Alias observados en el selector de SmartOLT. No se intenta invertir ni
-// reordenar segmentos del nombre mostrado automáticamente.
-const SMARTOLT_OLT_DISPLAY_NAME_MAP = {
-  "OLT-A-ELD": "ELD-OLT-A",
-};
+// Devuelve { status, warning } (warning null si no hay nada que avisar):
+//   - serial vacío                    -> no_serial (sin aviso)
+//   - prefijo distinto de HWTC/ZTEG   -> unknown_onu (aviso de ONU desconocida,
+//                                        aunque la OLT tampoco se conozca)
+//   - OLT sin ID o fuera de la matriz -> unknown_olt (sin aviso: no se afirma nada)
+//   - prefijo permitido en esa OLT    -> compatible (sin aviso)
+//   - si no                           -> incompatible (aviso de no compatible)
+function evaluateOnuOltCompatibility(oltId, serial) {
+  const S = ONU_COMPATIBILITY_STATUS;
+  const normalizedSerial = String(serial || "").replace(/\s+/g, "").toUpperCase();
+  if (!normalizedSerial) return { status: S.NO_SERIAL, warning: null };
 
-function resolveSmartoltOltIdentifier(oltId, displayedName) {
-  const id = String(oltId || "").trim();
-  if (SMARTOLT_OLT_ID_MAP[id]) return SMARTOLT_OLT_ID_MAP[id];
+  const prefix = Object.values(ONU_COMPATIBILITY_PREFIXES).find((p) => normalizedSerial.startsWith(p));
+  if (!prefix) return { status: S.UNKNOWN_ONU, warning: ONU_UNKNOWN_TYPE_WARNING };
 
-  const name = String(displayedName || "")
-    .replace(/^\s*\d+\s*-\s*/, "")
-    .trim()
-    .toUpperCase();
-  if (!name) return null;
-  if (SMARTOLT_OLT_DISPLAY_NAME_MAP[name]) return SMARTOLT_OLT_DISPLAY_NAME_MAP[name];
+  const id = String(oltId === null || oltId === undefined ? "" : oltId).trim();
+  const allowed = Object.prototype.hasOwnProperty.call(OLT_COMPATIBLE_ONU_PREFIXES, id)
+    ? OLT_COMPATIBLE_ONU_PREFIXES[id]
+    : null;
+  if (!allowed) return { status: S.UNKNOWN_OLT, warning: null };
 
-  const knownName = Object.values(OLT_COMPATIBILITY_GROUPS)
-    .flat()
-    .find((candidate) => candidate === name);
-  return knownName || null;
+  return allowed.includes(prefix)
+    ? { status: S.COMPATIBLE, warning: null }
+    : { status: S.INCOMPATIBLE, warning: ONU_OLT_COMPATIBILITY_WARNING };
 }
 
-function getOnuOltCompatibilityWarning(oltName, serial) {
-  const normalizedOlt = String(oltName || "").trim().toUpperCase();
-  const normalizedSerial = String(serial || "").trim().toUpperCase();
-  if (!normalizedOlt || !normalizedSerial) return null;
-
-  const oltFamily = Object.entries(OLT_COMPATIBILITY_GROUPS).find(([, names]) =>
-    names.includes(normalizedOlt)
-  );
-  if (!oltFamily) return null;
-
-  const [family] = oltFamily;
-  return normalizedSerial.startsWith(ONU_COMPATIBILITY_PREFIXES[family])
-    ? null
-    : ONU_OLT_COMPATIBILITY_WARNING;
+function getOnuOltCompatibilityWarning(oltId, serial) {
+  return evaluateOnuOltCompatibility(oltId, serial).warning;
 }
 
 // Fusible de seguridad ABSOLUTO — es un límite POR PON (128 = capacidad
@@ -1863,7 +1866,7 @@ function evaluateClientOptics(clientData, csvRecords) {
 }
 
 // ---------- Reporte completo de "OBTENER DATOS DEL CLIENTE" ----------
-// clientData: { name, caja, puerto, serial, oltName, sig1490 (Rx ONU), sig1310 (Rx OLT) },
+// clientData: { name, caja, puerto, serial, oltId, oltName, sig1490 (Rx ONU), sig1310 (Rx OLT) },
 // con cualquier campo en null/"" si no se pudo detectar en la página de SmartOLT.
 // csvRecords: records ya parseados del CSV capturado actualmente (o null/[] si
 // no hay ningún CSV capturado todavía). randomFn es opcional (por defecto
@@ -1880,7 +1883,8 @@ function evaluateClientOptics(clientData, csvRecords) {
 // mensaje del cliente.
 //
 // Devuelve { text, cajaWarning, compatibilityWarning }. El aviso de caja es
-// solo visual; el aviso ONU/OLT forma parte del texto copiado para que ambos
+// solo visual; el aviso ONU/OLT (no compatible u ONU de tipo desconocido, ver
+// evaluateOnuOltCompatibility) forma parte del texto copiado para que ambos
 // canales informen exactamente lo mismo.
 // Nunca se inventa un promedio: si no se puede calcular, la línea de
 // "Prom. de caja" queda con el texto fijo "no se pudo obtener promedio de
@@ -1895,7 +1899,8 @@ function buildClientReport(clientData, csvRecords, randomFn) {
   // se marca explícitamente con ⚠️ (ver más abajo).
   const puerto = clientData.puerto || "";
   const serial = clientData.serial || "N/D";
-  const compatibilityWarning = getOnuOltCompatibilityWarning(clientData.oltName, clientData.serial);
+  // La OLT se identifica por su ID real (data-olt-id de la ficha), nunca por la Zona.
+  const compatibilityWarning = getOnuOltCompatibilityWarning(clientData.oltId, clientData.serial);
   // Veredicto técnico: misma función que usa el dashboard CCT.
   const {
     caja,
@@ -2423,6 +2428,60 @@ const TAP_EASTER_EGG_DISPLAY_MS = 10000;
 // con notification.enabled generan una novedad pendiente.
 const CHANGELOG_ENTRIES = [
   {
+    version: "4.0.0",
+    changes: [
+      {
+        title: "🛠️ Extensión exclusiva para CCT",
+        text: "Se eliminaron el perfil Call Center y el selector de perfiles: la extensión abre directamente la interfaz de CCT.",
+      },
+      {
+        title: "📊 Dashboard de cliente",
+        text: "En la ficha de un cliente, el popup muestra un panel de consulta con el estado actual, el OP ONU / OLT comparado con el promedio de la caja, la condición (✅ / ❌ / ⚠️), caja, puerto, PPPoE, OLT, board, PON y distancia. Se actualiza con ↻.",
+      },
+      {
+        title: "⚠️ Avisos de PON y PPPoE",
+        text: "En las OLT con nomenclatura de caja (OLT-A a OLT-D), el dashboard de cliente avisa si el PON o el usuario PPPoE no coinciden con la caja y el puerto. Estos avisos no se agregan al informe.",
+      },
+      {
+        title: "📦 Dashboard de cajas",
+        text: "Fuera de una ficha de cliente, el popup muestra las cajas del CSV con su promedio, como bloques desplegables, y dentro de cada una los clientes a revisar agrupados en LOS / Power Fail / Offline y OP fuera de margen. Avisa si la caja de la página no está en los datos cargados.",
+      },
+      {
+        title: "🔎 ESTADO DE CAJAS más completo",
+        text: "El informe indica cuántos clientes Online tienen el OP fuera de margen, separa LOS de Power fail/Offline y lista en un solo bloque a los clientes a revisar, incluidos los de OP fuera de margen, con el mismo criterio del informe de cliente.",
+      },
+      {
+        title: "📋 GENERAR INFORME",
+        text: "El botón 👤 OBTENER DATOS DEL CLIENTE pasa a llamarse 📋 GENERAR INFORME.",
+      },
+      {
+        title: "🔌 Compatibilidad ONU / OLT según NOC",
+        text: "La compatibilidad se evalúa con la matriz oficial informada por NOC, identificando la OLT por su ID: HWTC es compatible con las OLT 2 a 13, 15 y 16; ZTEG, con las OLT 9, 12, 13, 15 y 16. La misma regla se aplica en la ficha del cliente, en /onu/unconfigured y en el informe.",
+      },
+      {
+        title: "❓ ONU de tipo desconocido",
+        text: "Las ONU cuyo serial no comienza con HWTC ni ZTEG se marcan como ONU de tipo desconocido (no se dispone de información de compatibilidad) en lugar de pasar sin aviso. El aviso también se incluye en el texto del informe.",
+      },
+      {
+        title: "🏷️ Advertencias más claras",
+        text: "En /onu/unconfigured las advertencias se muestran como una marca corta (⚠️ No compatible / ⚠️ ONU desconocida), igual que en la ficha del cliente, y el detalle completo aparece al pasar el cursor. El informe para Telegram conserva el texto completo.",
+      },
+      {
+        title: "📏 Diferencia con el promedio",
+        text: "En el dashboard de cliente, la diferencia del OP con el promedio de la caja se indica sin signos: \"X.XX dB peor que prom.\" o \"X.XX dB mejor que prom.\" (por debajo de 0.05 dB: \"X.XX dB vs prom.\"). Los cálculos y la condición no cambian.",
+      },
+      {
+        title: "🎨 Notificaciones por tipo",
+        text: "Las notificaciones usan un color según su tipo: verde para confirmaciones, amarillo para advertencias, rojo para errores y azul para novedades.",
+      },
+      {
+        title: "🎉 Fechas especiales",
+        text: "Se mantienen sin cambios los temas y mensajes de fechas especiales y el easter egg de la firma.",
+      },
+    ],
+    notifications: [],
+  },
+  {
     version: "3.1.1",
     changes: [
       {
@@ -2649,12 +2708,12 @@ const SmartOLTShared = {
   isClientPageUrl,
   isOnuConfiguredPageUrl,
   OPTICAL_TOLERANCE_DB,
-  OLT_COMPATIBILITY_GROUPS,
   ONU_COMPATIBILITY_PREFIXES,
+  OLT_COMPATIBLE_ONU_PREFIXES,
   ONU_OLT_COMPATIBILITY_WARNING,
-  SMARTOLT_OLT_ID_MAP,
-  SMARTOLT_OLT_DISPLAY_NAME_MAP,
-  resolveSmartoltOltIdentifier,
+  ONU_UNKNOWN_TYPE_WARNING,
+  ONU_COMPATIBILITY_STATUS,
+  evaluateOnuOltCompatibility,
   getOnuOltCompatibilityWarning,
   parseCSV,
   analyzeCSV,

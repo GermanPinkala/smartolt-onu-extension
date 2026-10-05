@@ -6,36 +6,13 @@
 <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
-  <!-- Capa de perfiles (v4): profile.js decide cuál de estas vistas se
-       muestra según el perfil guardado en chrome.storage.local. Todas arrancan
-       ocultas hasta que se lee el perfil. -->
-  <div id="profileSelectView" class="profile-view" hidden>
-    <header class="app-header">
-      <h1>SmartOLT — Control</h1>
-      <p class="subtitle">Seleccioná tu perfil</p>
-    </header>
-    <main class="profile-main">
-      <button class="btn btn-primary profile-option" type="button" data-profile="cct">🛠️ CCT</button>
-      <button class="btn btn-primary profile-option" type="button" data-profile="callcenter">📞 CALL CENTER</button>
-      <button id="profileCancelBtn" class="btn btn-ghost" type="button" hidden>Cancelar</button>
-    </main>
-  </div>
-
-  <!-- Vista principal, compartida por CCT y CALL CENTER: interfaz de v3.1.1
-       (popup.js) + dashboards. profile.js la muestra con el perfil guardado,
-       carga los scripts de ese perfil y marca <body data-profile="...">; los
-       elementos .profile-cct / .profile-callcenter solo se ven con su perfil
-       (ver popup.css). -->
-  <div id="appView" class="profile-view" hidden>
+  <!-- Vista principal (CCT): interfaz de v3.1.1 (popup.js) + dashboards
+       (dashboard.js). Visible desde el inicio. -->
+  <div id="appView">
   <header class="app-header">
     <h1>SmartOLT — Control de ONUs</h1>
     <p class="subtitle" id="subtitle">Estado del último CSV capturado</p>
   </header>
-
-  <div class="profile-bar">
-    <span id="profileBarLabel">Perfil:</span>
-    <button class="profile-bar-btn js-change-profile" type="button">⚙️ Cambiar perfil</button>
-  </div>
 
   <main>
     <!-- Pantalla principal: pasiva, solo refleja el estado guardado (nunca dispara nada al abrir) -->
@@ -81,7 +58,7 @@
            habilita/deshabilita solo según la pestaña activa (ver
            refreshClienteBtnState en popup.js). -->
       <div id="capturedBox" class="captured-box" hidden>
-        <!-- Dashboard de cliente (v4, CCT y CALL CENTER): solo visible con una
+        <!-- Dashboard de cliente (v4): solo visible con una
              ficha de cliente (/onu/view/ID) activa. Lo maneja dashboard.js; es
              solo de consulta y nunca se agrega al informe para el técnico. -->
         <section id="clientDashboard" class="client-dashboard" hidden aria-live="polite">
@@ -99,12 +76,9 @@
           <p id="cdCaja" class="cd-line"></p>
           <p id="cdNetwork" class="cd-line"></p>
           <div id="cdAlerts" class="cd-alerts" hidden></div>
-          <!-- Diagnóstico de CALL CENTER (cc-dashboard.js): historial de 24 hs,
-               cortes y afectación de la caja. Solo con ese perfil. -->
-          <div id="ccClientSection" class="cc-section profile-callcenter" hidden></div>
         </section>
 
-        <!-- Dashboard de caja (v4, CCT y CALL CENTER): estado por defecto fuera de una ficha
+        <!-- Dashboard de caja (v4): estado por defecto fuera de una ficha
              de cliente. Las cajas del CSV capturado como bloques desplegables (una caja abierta a la
              vez) y, dentro, los clientes con problemas en categorías
              desplegables (una abierta a la vez). Avisa si la caja de la página
@@ -123,11 +97,8 @@
 
         <button id="updateDataBtn" class="btn btn-primary" disabled title="Abrí /onu/configured en SmartOLT para actualizar los datos.">🔄 Actualizar datos</button>
         <p id="updateStatus" class="update-status" hidden></p>
-        <!-- Botones de cada perfil: solo se ven con su perfil activo. -->
-        <button id="consultarCajasBtn" class="btn btn-secondary profile-cct">🔎 ESTADO DE CAJAS</button>
-        <button id="obtenerClienteBtn" class="btn btn-client-disabled profile-cct" disabled title="Abrí la ficha de un cliente en SmartOLT (.../onu/view/ID) para usar este botón.">📋 GENERAR INFORME</button>
-        <button id="ccBoxReportBtn" class="btn btn-secondary profile-callcenter" disabled title="Este botón necesita un CSV exportado desde SmartOLT.">📦 INFORME DE CAJAS</button>
-        <button id="ccObservationBtn" class="btn btn-client-disabled profile-callcenter" disabled title="Abrí la ficha de un cliente en SmartOLT (.../onu/view/ID) para usar este botón.">📋 GENERAR OBSERVACIÓN</button>
+        <button id="consultarCajasBtn" class="btn btn-secondary">🔎 ESTADO DE CAJAS</button>
+        <button id="obtenerClienteBtn" class="btn btn-client-disabled" disabled title="Abrí la ficha de un cliente en SmartOLT (.../onu/view/ID) para usar este botón.">📋 GENERAR INFORME</button>
 
         <section class="generated-preview" aria-labelledby="generatedPreviewLabel">
           <button id="generatedPreviewToggle" class="generated-preview-toggle" type="button" aria-expanded="false" aria-controls="generatedTextPreview">
@@ -188,8 +159,8 @@
   </div>
 
   <script src="shared.js"></script>
-  <!-- popup.js, dashboard.js y los scripts de cada perfil los inyecta
-       profile.js según el perfil activo. -->
-  <script src="profile.js"></script>
+  <script src="popup.js"></script>
+  <!-- dashboard.js reutiliza funciones de popup.js: va después. -->
+  <script src="dashboard.js"></script>
 </body>
 </html>

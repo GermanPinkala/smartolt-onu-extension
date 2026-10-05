@@ -1,10 +1,9 @@
 "use strict";
 
 /**
- * SmartOLT — Control — dashboards de diagnóstico (v4, CCT y CALL CENTER)
+ * SmartOLT — Control — dashboards de diagnóstico CCT (v4)
  *
- * Componente compartido por los perfiles. Paneles de CONSULTA según el
- * contexto de la pestaña:
+ * Paneles de CONSULTA según el contexto de la pestaña:
  *   - Ficha de cliente (/onu/view/ID): estado, niveles ópticos contra el
  *     promedio de su caja, caja/puerto/OLT/board/PON y avisos internos (PON y
  *     PPPoE vs caja).
@@ -12,10 +11,9 @@
  *     SmartOLT): las cajas del CSV, cada una desplegable
  *     con sus clientes a revisar agrupados en categorías desplegables.
  *
- * - Lo carga profile.js DESPUÉS de popup.js (con cualquier perfil), así que
- *   reutiliza directamente las piezas de popup.js (getActiveTab,
- *   injectedExtractClientData, readNapFromTab, getCurrentRecords) y de
- *   shared.js (evaluateClientOptics y las validaciones) — el cálculo del
+ * - popup.html lo carga DESPUÉS de popup.js, así que reutiliza directamente
+ *   las piezas de popup.js (getActiveTab, injectedExtractClientData,
+ *   readNapFromTab, getCurrentRecords) y de shared.js (evaluateClientOptics y las validaciones) — el cálculo del
  *   promedio, Check 1/2/3 y el ✅/❌/⚠️ es exactamente el mismo del informe.
  * - Nunca modifica el informe: "📋 GENERAR INFORME" sigue siendo
  *   handleObtenerCliente de popup.js, sin cambios.
@@ -28,9 +26,6 @@
  *   guarda ni se muestra — a la extensión solo vuelve el estado.
  * - PPPoE: se lee únicamente el usuario (data-username). El mismo enlace de
  *   SmartOLT trae la contraseña: nunca se lee.
- * - Un perfil puede SUMAR contenido sin que este archivo pregunte por el
- *   perfil: registra una extensión con registerDashboardExtension (ver abajo).
- *   CCT no registra ninguna; Call Center, las de cc-dashboard.js.
  */
 
 const clientDashboard = document.getElementById("clientDashboard");
@@ -51,37 +46,10 @@ const boxDashboard = document.getElementById("boxDashboard");
 
 const ONU_VIEW_ID_RE = /\/onu\/view\/(\d+)/i;
 
-// ---------- Extensiones de perfil ----------
-// Cada extensión es un objeto con cualquiera de estos métodos (todos
-// opcionales):
-//   - clientRendered(state): después de dibujar el dashboard de cliente.
-//     state = { runId, tab, onuId, page, clientData, live, evaluation, records }.
-//     Puede seguir trabajando en forma asíncrona; con isCurrentDashboardRun(runId)
-//     sabe si su resultado sigue vigente.
-//   - boxFlags(box): textos extra para la cabecera de una caja del dashboard de
-//     cajas. box = { key, caja, records, average, ...diagnóstico de
-//     buildCajaDiagnosis }.
-//   - contextChanged(context): cada vez que se decide el contexto visible
-//     ("client", "box" o null).
-const dashboardExtensions = [];
-
-function registerDashboardExtension(extension) {
-  dashboardExtensions.push(extension);
-}
-
+// Con isCurrentDashboardRun(runId) un trabajo asíncrono sabe si su resultado
+// sigue vigente (ver dashboardRunId más abajo).
 function isCurrentDashboardRun(runId) {
   return runId === dashboardRunId;
-}
-
-function notifyDashboardExtensions(method, ...args) {
-  dashboardExtensions.forEach((extension) => {
-    if (typeof extension[method] !== "function") return;
-    try {
-      extension[method](...args);
-    } catch (e) {
-      // Una extensión con error nunca rompe el dashboard base.
-    }
-  });
 }
 
 // ---------- Lectores inyectados en la ficha (autocontenidos) ----------
@@ -494,22 +462,6 @@ function renderBoxDashboard(diagnoses, missingCajas) {
       " Online",
     ]);
     text.append(title, summary);
-    // Avisos que suman las extensiones de perfil (p. ej. Call Center).
-    dashboardExtensions.forEach((extension) => {
-      if (typeof extension.boxFlags !== "function") return;
-      let flags = [];
-      try {
-        flags = extension.boxFlags(d) || [];
-      } catch (e) {
-        flags = [];
-      }
-      flags.forEach((flagText) => {
-        const flag = document.createElement("span");
-        flag.className = "bd-flag";
-        flag.textContent = flagText;
-        text.appendChild(flag);
-      });
-    });
     const chevron = document.createElement("span");
     chevron.className = "bd-chevron";
     chevron.textContent = open ? "▾" : "▸";
@@ -580,7 +532,6 @@ function setDashboardContext(context) {
   boxDashboard.hidden = context !== "box";
   if (context) capturedBox.dataset.context = context;
   else delete capturedBox.dataset.context;
-  notifyDashboardExtensions("contextChanged", context);
 }
 
 // Cada actualización tiene un número: si mientras tanto empezó otra (el
@@ -620,8 +571,7 @@ async function refreshDashboard() {
     const clientData = Object.assign({ name: null, serial: null, oltName: null, sig1490: null, sig1310: null }, extracted);
     clientData.caja = (nap && nap.caja) || null;
     clientData.puerto = clientData.caja && nap ? nap.puerto : null;
-    const { evaluation, records } = renderDashboard({ page, clientData, live });
-    notifyDashboardExtensions("clientRendered", { runId, tab, onuId: match[1], page, clientData, live, evaluation, records });
+    renderDashboard({ page, clientData, live });
   } finally {
     if (runId === dashboardRunId) cdRefreshBtn.disabled = false;
   }
@@ -648,6 +598,5 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "session" && changes[STORAGE_KEY]) scheduleDashboardRefresh();
 });
 
-// Arranca cuando profile.js avisa que se cargaron TODOS los scripts del
-// perfil (así las extensiones ya están registradas en la primera vuelta).
-document.addEventListener("profile-scripts-loaded", refreshDashboard, { once: true });
+// Primera actualización al abrir el popup (popup.js ya se cargó antes).
+refreshDashboard();

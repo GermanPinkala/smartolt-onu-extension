@@ -1,8 +1,8 @@
 "use strict";
 
-// Harness compartido por los tests de integración del popup (CCT y Call
-// Center): carga el popup.html real con profile.js y los scripts del perfil
-// en jsdom. Las funciones que la extensión inyecta en la pestaña
+// Harness compartido por los tests de integración del popup (CCT): carga el
+// popup.html real con sus scripts (shared.js, popup.js, dashboard.js) en
+// jsdom. Las funciones que la extensión inyecta en la pestaña
 // (chrome.scripting.executeScript) se ejecutan de verdad contra un segundo DOM
 // que reproduce la página activa (SmartOLT u otra).
 
@@ -56,9 +56,9 @@ function defaultFetch(url) {
   return null;
 }
 
-// profile: "cct" | "callcenter". fetchHandler(url, options) devuelve el JSON
-// (objeto) o el texto (string) que respondería SmartOLT para esa URL.
-async function openPopup({ profile = "cct", localStore = null, version = "3.1.1", tabUrl, pageHtml, csvRows, fetchHandler = defaultFetch, capturedAt = Date.now() }) {
+// fetchHandler(url, options) devuelve el JSON (objeto) o el texto (string)
+// que respondería SmartOLT para esa URL.
+async function openPopup({ localStore = null, version = "3.1.1", tabUrl, pageHtml, csvRows, fetchHandler = defaultFetch, capturedAt = Date.now() }) {
   const errors = [];
   const vc = new VirtualConsole();
   vc.on("jsdomError", (e) => {
@@ -82,7 +82,7 @@ async function openPopup({ profile = "cct", localStore = null, version = "3.1.1"
   loadTab(tabUrl, pageHtml);
   // local: "disco" de chrome.storage.local; se puede pasar uno propio para
   // simular varias aperturas del popup con el mismo almacenamiento.
-  const local = localStore || { profile };
+  const local = localStore || {};
   const session = csvRows
     ? { smartoltState: { status: "captured", total: csvRows.length, onlineCount: 0, csvText: csv(csvRows), fileName: "x.csv", capturedAt } }
     : {};

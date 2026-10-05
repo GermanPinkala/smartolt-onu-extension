@@ -624,46 +624,6 @@ body[data-theme="navidad"] {
   --accent-hover: #24803f;
 }
 
-/* ---------- Capa de perfiles (v4) ---------- */
-/* Selector de perfil y barra "Perfil: ..." de la vista principal (ver
-   profile.js). Solo agrega reglas propias: no modifica ninguna regla de CCT. */
-.profile-main {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 22px 18px 24px;
-}
-
-.profile-option {
-  padding: 14px 16px;
-  font-size: 15px;
-}
-
-.profile-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 18px;
-  border-bottom: 1px solid var(--border);
-  color: var(--text-dim);
-  font-size: 11.5px;
-}
-
-.profile-bar-btn {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 3px 8px;
-  background: var(--panel);
-  color: var(--text);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.profile-bar-btn:hover {
-  background: #24344c;
-}
-
 /* ---------- Dashboard de diagnóstico CCT (v4) ---------- */
 /* Panel compacto sobre la ficha de cliente (ver cct-dashboard.js). Usa las
    mismas variables de color que el resto del popup, así también respeta los
@@ -945,64 +905,9 @@ body[data-theme="navidad"] {
   border-bottom: 1px solid var(--border);
 }
 
-/* ---------- Perfiles sobre la vista principal (v4) ---------- */
-/* profile.js marca <body data-profile="...">: cada elemento .profile-<id>
-   solo se ve con su perfil. */
-body:not([data-profile="cct"]) .profile-cct,
-body:not([data-profile="callcenter"]) .profile-callcenter {
-  display: none;
-}
-
-/* Promedio junto al nombre de la caja y avisos de la cabecera (ambos perfiles). */
+/* Promedio junto al nombre de la caja. */
 .bd-avg {
   color: var(--text-dim);
   font-size: 11.5px;
   font-weight: 500;
-}
-
-.bd-flag {
-  color: #fca5a5;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-/* ---------- Diagnóstico de CALL CENTER en la ficha (v4) ---------- */
-.cc-section {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-}
-
-.cc-section[hidden] {
-  display: none;
-}
-
-.cc-line {
-  margin: 0;
-  font-size: 12.5px;
-  line-height: 1.4;
-}
-
-.cc-problem {
-  color: #fbbf24;
-  font-weight: 600;
-}
-
-.cc-ok {
-  color: var(--green);
-}
-
-.cc-info,
-.cc-source {
-  color: var(--text-dim);
-  font-size: 11.5px;
-}
-
-/* Línea con detalle bajo demanda (tooltip nativo por atributo title). */
-.cc-has-tooltip {
-  cursor: help;
-  text-decoration: underline dotted;
-  text-underline-offset: 3px;
 }

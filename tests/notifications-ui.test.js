@@ -1,6 +1,6 @@
 "use strict";
 
-// Notificaciones (componente común de popup.js, CCT y Call Center): el TIPO
+// Notificaciones (componente común de popup.js): el TIPO
 // define el esquema visual (success verde, info azul/neutro, warning amarillo,
 // error rojo) sin cambiar el texto ni el mecanismo de mostrar/cerrar.
 // Correr con: cd tests && npm test
@@ -38,21 +38,19 @@ function assertColor(actual, expected) {
 }
 
 test("SUCCESS: 'CSV capturado correctamente' se ve en verde, mismo texto y se puede cerrar", async () => {
-  for (const profile of ["cct", "callcenter"]) {
-    const p = await open({ profile });
-    p.w.showCsvCapturedNotification({ fileName: "x.csv", capturedAt: 1, csvText: "abc" });
-    const n = notice(p);
-    assert.equal(n.visible, true, profile);
-    assert.equal(n.type, "success", profile);
-    assert.equal(n.kind, "operational", profile);
-    assert.equal(n.summary, "✅ CSV capturado correctamente.", profile);
-    assert.equal(n.closable, true, profile);
-    assertColor(n.borderLeft, GREEN);
-    assert.equal(n.background, "rgba(34, 197, 94, 0.14)", profile);
-    p.$("notificationCloseBtn").click();
-    assert.equal(p.$("notificationBox").hidden, true, profile);
-    p.close();
-  }
+  const p = await open();
+  p.w.showCsvCapturedNotification({ fileName: "x.csv", capturedAt: 1, csvText: "abc" });
+  const n = notice(p);
+  assert.equal(n.visible, true);
+  assert.equal(n.type, "success");
+  assert.equal(n.kind, "operational");
+  assert.equal(n.summary, "✅ CSV capturado correctamente.");
+  assert.equal(n.closable, true);
+  assertColor(n.borderLeft, GREEN);
+  assert.equal(n.background, "rgba(34, 197, 94, 0.14)");
+  p.$("notificationCloseBtn").click();
+  assert.equal(p.$("notificationBox").hidden, true);
+  p.close();
 });
 
 test("WARNING: datos desactualizados / sin caja seleccionada se ven en amarillo", async () => {

@@ -1,7 +1,7 @@
 "use strict";
 
-// Integración de los dashboards del perfil CCT (v4) en el popup real (ver
-// popup-harness.js: popup.html + profile.js + scripts del perfil en jsdom).
+// Integración de los dashboards CCT (v4) en el popup real (ver
+// popup-harness.js: popup.html + sus scripts en jsdom).
 // Correr con: cd tests && npm test
 
 const test = require("node:test");
@@ -306,4 +306,36 @@ test("sin CSV (cualquier página): no hay dashboard de cajas, se mantiene el est
     assert.equal(p.$("consultarCajasBtn").disabled, true, url);
     p.close();
   }
+});
+
+// ---------- Migrados de callcenter-ui.test.js (comportamiento de CCT) ----------
+
+test("CCT: abre directo, sin selector de perfil ni Call Center; sus botones y una sola consulta", async () => {
+  const p = await openPopup({ tabUrl: "https://demo.smartolt.com/onu/view/555", pageHtml: FICHA, csvRows: HEALTHY });
+  await new Promise((r) => setTimeout(r, 300));
+  assert.deepEqual(p.errors, []);
+  assert.equal(p.visible(p.$("appView")), true);
+  assert.equal(p.$("profileSelectView"), null);
+  assert.equal(p.$("profileBarLabel"), null);
+  assert.equal(p.visible(p.$("consultarCajasBtn")), true);
+  assert.equal(p.visible(p.$("obtenerClienteBtn")), true);
+  assert.equal(p.$("ccBoxReportBtn"), null);
+  assert.equal(p.$("ccObservationBtn"), null);
+  assert.equal(p.$("ccClientSection"), null);
+  assert.equal(p.w.SmartOLTCallCenter, undefined);
+  assert.deepEqual(p.calls.fetches.map((f) => f.url.split("?")[0].replace(/\d+$/, "")), ["/api/onu/get_onu_status_and_signal/"]);
+  p.close();
+});
+
+test("vista caja CCT: promedio junto al nombre de cada caja", async () => {
+  const p = await openPopup({ tabUrl: CONFIGURED_URL, pageHtml: CONFIGURED_PAGE(["A6DB4"]), csvRows: HEALTHY });
+  assert.equal(p.w.document.querySelector("#boxDashboard .bd-title").textContent, "📦 A6DB4 · Prom. ONU -20.10 / OLT -23.03 dBm");
+  p.close();
+});
+
+test("vista caja CCT: nunca muestra 'Posible caja cortada'", async () => {
+  const rows = [row("X1", "C27A3", 1, "LOS"), row("X2", "C27A3", 2, "LOS")];
+  const p = await openPopup({ tabUrl: CONFIGURED_URL, pageHtml: CONFIGURED_PAGE(["C27A3"]), csvRows: rows });
+  assert.ok(!p.$("boxDashboard").textContent.includes("Posible caja cortada"));
+  p.close();
 });

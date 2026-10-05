@@ -2431,8 +2431,8 @@ const CHANGELOG_ENTRIES = [
     version: "4.0.0",
     changes: [
       {
-        title: "🛠️ Extensión exclusiva para CCT",
-        text: "Se eliminaron el perfil Call Center y el selector de perfiles: la extensión abre directamente la interfaz de CCT.",
+        title: "🛠️ Enfocada en CCT",
+        text: "La versión 4 está orientada exclusivamente al trabajo de CCT: sus nuevas funciones están pensadas para el diagnóstico de clientes y cajas.",
       },
       {
         title: "📊 Dashboard de cliente",
@@ -2473,10 +2473,6 @@ const CHANGELOG_ENTRIES = [
       {
         title: "🎨 Notificaciones por tipo",
         text: "Las notificaciones usan un color según su tipo: verde para confirmaciones, amarillo para advertencias, rojo para errores y azul para novedades.",
-      },
-      {
-        title: "🎉 Fechas especiales",
-        text: "Se mantienen sin cambios los temas y mensajes de fechas especiales y el easter egg de la firma.",
       },
     ],
     notifications: [],
